@@ -26,15 +26,18 @@ ATR = Decimal("300.0")
 
 
 def _make_pos(**kwargs):
-    return make_position(
+    defaults = dict(
         direction="LONG", entry=ENTRY, tp=70000.0, sl=66000.0,
         qty=0.01, leverage=5, margin=134.0, original_risk=10.0,
-        **kwargs,
     )
+    defaults.update(kwargs)
+    return make_position(**defaults)
 
 
 def _make_acc(**kwargs):
-    return make_account(daily_limit=100.0, weekly_limit=300.0, **kwargs)
+    defaults = dict(daily_limit=100.0, weekly_limit=300.0)
+    defaults.update(kwargs)
+    return make_account(**defaults)
 
 
 # ── check_dca_eligibility 거부 조건 ──────────────────────────────────────────

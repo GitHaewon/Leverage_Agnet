@@ -49,6 +49,7 @@ RISK_PROFILE_DEFAULT_RISK: dict[str, float] = {
 MAX_PORTFOLIO_RISK: float = 0.10              # 10%
 MAX_PORTFOLIO_RISK_AGGRESSIVE: float = 0.15  # 15%
 MAX_SINGLE_POSITION_MARGIN_RATIO: float = 0.20  # 20%
+MAX_SINGLE_COIN_PORTFOLIO_RATIO: float = 0.50   # §2.4 단일 코인 집중도 한도 50%
 MARGIN_BUFFER_RATIO: float = 1.10            # 10% 버퍼
 
 # ── 일일 손실 (§4) ─────────────────────────────────────────────────────────────

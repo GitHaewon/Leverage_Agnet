@@ -83,20 +83,21 @@ def close_position(
     gross_pnl, exit_fee, net_pnl = _calc_pnl(
         position.direction, position.entry_price, close_price, close_qty, fee_rate
     )
-    pnl_pct = (net_pnl / position.margin_used * Decimal("100")) if position.margin_used else Decimal("0")
+    net_pnl_q = net_pnl.quantize(Decimal("0.01"))
+    pnl_pct = (net_pnl_q / position.margin_used * Decimal("100")) if position.margin_used else Decimal("0")
 
     position.status = "closed"
     position.closed_at = datetime.now(timezone.utc)
     position.close_reason = reason
     position.current_price = close_price
-    position.realized_pnl += net_pnl
+    position.realized_pnl += net_pnl_q
 
     return CloseResult(
         position=position,
         closed_quantity=close_qty,
         gross_pnl=gross_pnl.quantize(Decimal("0.01")),
         fee=exit_fee.quantize(Decimal("0.0001")),
-        net_pnl=net_pnl.quantize(Decimal("0.01")),
+        net_pnl=net_pnl_q,
         pnl_pct=pnl_pct.quantize(Decimal("0.01")),
         is_partial=False,
         close_reason=reason,
@@ -128,12 +129,13 @@ def partial_close(
     gross_pnl, exit_fee, net_pnl = _calc_pnl(
         position.direction, position.entry_price, close_price, close_qty, fee_rate
     )
+    net_pnl_q = net_pnl.quantize(Decimal("0.01"))
     close_margin = (position.margin_used * Decimal(str(ratio))).quantize(Decimal("0.0001"))
-    pnl_pct = (net_pnl / close_margin * Decimal("100")) if close_margin else Decimal("0")
+    pnl_pct = (net_pnl_q / close_margin * Decimal("100")) if close_margin else Decimal("0")
 
     position.quantity -= close_qty
     position.margin_used -= close_margin
-    position.realized_pnl += net_pnl
+    position.realized_pnl += net_pnl_q
     position.status = "partially_closed"
     position.current_price = close_price
 
@@ -142,7 +144,7 @@ def partial_close(
         closed_quantity=close_qty,
         gross_pnl=gross_pnl.quantize(Decimal("0.01")),
         fee=exit_fee.quantize(Decimal("0.0001")),
-        net_pnl=net_pnl.quantize(Decimal("0.01")),
+        net_pnl=net_pnl_q,
         pnl_pct=pnl_pct.quantize(Decimal("0.01")),
         is_partial=True,
         close_reason="partial",
