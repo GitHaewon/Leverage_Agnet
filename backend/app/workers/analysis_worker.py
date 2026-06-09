@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from decimal import Decimal
 from typing import Any
 
@@ -23,27 +24,59 @@ logger = logging.getLogger(__name__)
 
 # ── 의존성 조립 ──────────────────────────────────────────────────────────────
 
-def _build_deps() -> "OrchestratorDeps":
-    """실제 에이전트를 OrchestratorPipeline에 주입한다."""
+async def _build_deps(
+    redis: "Any",
+    user_id: uuid.UUID | None = None,
+) -> "OrchestratorDeps":
+    """
+    실제 에이전트를 OrchestratorPipeline에 주입한다.
+
+    user_id가 주어지고 LIVE_TRADING_ENABLED=true이면 BinanceGateway를 사용.
+    그 외에는 PaperGateway (기본값, 실거래 없음).
+    """
     from agents.orchestrator.pipeline import OrchestratorDeps
     from agents.market_data.agent import MarketDataAgent
     from agents.technical_analysis.agent import TechnicalAnalysisAgent
     from agents.strategy.engine import StrategyEngine
-    from agents.ai_analyst.agent import AIAnalystAgent
+    from agents.analyst.agent import AnalystAgent, AnthropicClient
     from agents.risk.engine import RiskEngine
     from agents.portfolio.engine import PortfolioEngine
-    from agents.position.manager import PositionManager
+    from agents.position_manager.engine import PositionManagerEngine
     from agents.execution.engine import ExecutionEngine
+    from agents.execution.gateway import PaperGateway
+
+    risk_engine = RiskEngine(redis=redis)
+
+    if settings.LIVE_TRADING_ENABLED and user_id is not None:
+        from app.gateways.binance_gateway import BinanceGateway
+        gateway = BinanceGateway(
+            user_id=user_id,
+            is_testnet=settings.BINANCE_TESTNET,
+        )
+        live = True
+        mode = "testnet" if settings.BINANCE_TESTNET else "live"
+    else:
+        gateway = PaperGateway()
+        live = False
+        mode = "paper"
 
     return OrchestratorDeps(
-        market_data=MarketDataAgent(),
+        market_data=MarketDataAgent(redis=redis),
         technical=TechnicalAnalysisAgent(),
         strategy=StrategyEngine(),
-        analyst=AIAnalystAgent(),
-        risk=RiskEngine(),
+        analyst=AnalystAgent(
+            client=AnthropicClient(api_key=settings.ANTHROPIC_API_KEY),
+            model=settings.CLAUDE_MODEL,
+        ),
+        risk=risk_engine,
         portfolio=PortfolioEngine(),
-        position_manager=PositionManager(),
-        execution=ExecutionEngine(),
+        position_manager=PositionManagerEngine(),
+        execution=ExecutionEngine(
+            risk_validator=risk_engine,
+            gateway=gateway,
+            live_trading_enabled=live,
+            mode=mode,
+        ),
     )
 
 
@@ -67,49 +100,63 @@ def run_analysis_cycle(self: Task, symbols: list[str]) -> dict[str, Any]:
 
 
 async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
+    import redis.asyncio as aioredis
     from app.services.user_service import get_auto_trading_users
     from agents.orchestrator.pipeline import OrchestratorPipeline
     from agents.orchestrator.models import PipelineInput
 
-    deps = _build_deps()
-    pipeline = OrchestratorPipeline(deps)
+    redis_client = aioredis.from_url(str(settings.REDIS_URL), decode_responses=True)
+    try:
+        results: dict[str, Any] = {}
+        users = await get_auto_trading_users()
+        logger.info("analysis_cycle started: %d users × %d symbols", len(users), len(symbols))
 
-    results: dict[str, Any] = {}
+        # Paper mode: AI 에이전트는 사용자 무관 → 파이프라인 한 번만 구성
+        # Live/Testnet: BinanceGateway가 user_id에 의존 → 사용자별로 재구성
+        shared_pipeline: OrchestratorPipeline | None = None
+        if not settings.LIVE_TRADING_ENABLED:
+            shared_deps = await _build_deps(redis_client)
+            shared_pipeline = OrchestratorPipeline(shared_deps)
 
-    users = await get_auto_trading_users()
-    logger.info("analysis_cycle started: %d users × %d symbols", len(users), len(symbols))
+        for user in users:
+            if settings.LIVE_TRADING_ENABLED:
+                user_deps = await _build_deps(redis_client, user_id=user.id)
+                pipeline = OrchestratorPipeline(user_deps)
+            else:
+                pipeline = shared_pipeline  # type: ignore[assignment]
 
-    for user in users:
-        for symbol in symbols:
-            coin = symbol.replace("USDT", "")
-            inp = PipelineInput(
-                coin=coin,
-                user_id=str(user.id),
-                user_ctx=user,
-                account_state=user.account_state,
-                daily_loss_usdt=user.daily_loss_usdt or Decimal("0"),
-                weekly_loss_usdt=user.weekly_loss_usdt or Decimal("0"),
-                weekly_limit_usdt=user.weekly_limit_usdt or Decimal("500"),
-                consecutive_losses=user.consecutive_losses,
-                open_positions=user.open_positions or [],
-                portfolio_account=user.portfolio_account,
-            )
-            try:
-                result = await pipeline.run(inp)
-                results[f"{user.id}:{coin}"] = {
-                    "status": result.status,
-                    "run_id": result.run_id,
-                }
-                logger.info(
-                    "pipeline done user=%s coin=%s status=%s run_id=%s",
-                    user.id, coin, result.status, result.run_id,
+            for symbol in symbols:
+                coin = symbol.replace("USDT", "")
+                inp = PipelineInput(
+                    coin=coin,
+                    user_id=str(user.id),
+                    user_ctx=user,
+                    account_state=user.account_state,
+                    daily_loss_usdt=user.daily_loss_usdt or Decimal("0"),
+                    weekly_loss_usdt=user.weekly_loss_usdt or Decimal("0"),
+                    weekly_limit_usdt=user.weekly_limit_usdt or Decimal("500"),
+                    consecutive_losses=user.consecutive_losses,
+                    open_positions=user.open_positions or [],
+                    portfolio_account=user.portfolio_account,
                 )
-            except Exception as exc:
-                # 개별 사용자 실패는 격리 — 다음 사용자 계속 진행
-                logger.exception("pipeline error user=%s coin=%s: %s", user.id, coin, exc)
-                results[f"{user.id}:{coin}"] = {"status": "error", "error": str(exc)}
+                try:
+                    result = await pipeline.run(inp)
+                    results[f"{user.id}:{coin}"] = {
+                        "status": result.status,
+                        "run_id": result.run_id,
+                    }
+                    logger.info(
+                        "pipeline done user=%s coin=%s status=%s run_id=%s",
+                        user.id, coin, result.status, result.run_id,
+                    )
+                except Exception as exc:
+                    # 개별 사용자 실패는 격리 — 다음 사용자 계속 진행
+                    logger.exception("pipeline error user=%s coin=%s: %s", user.id, coin, exc)
+                    results[f"{user.id}:{coin}"] = {"status": "error", "error": str(exc)}
 
-    return results
+        return results
+    finally:
+        await redis_client.aclose()
 
 
 @celery_app.task(
@@ -136,43 +183,49 @@ async def _run_single_async(
     coin: str,
     user_ctx_dict: dict | None,
 ) -> dict[str, Any]:
+    import redis.asyncio as aioredis
     from app.services.user_service import get_user_context
     from agents.orchestrator.pipeline import OrchestratorPipeline
     from agents.orchestrator.models import PipelineInput
 
-    deps = _build_deps()
-    pipeline = OrchestratorPipeline(deps)
+    redis_client = aioredis.from_url(str(settings.REDIS_URL), decode_responses=True)
+    try:
+        uid = uuid.UUID(user_id)
+        deps = await _build_deps(redis_client, user_id=uid)
+        pipeline = OrchestratorPipeline(deps)
 
-    user = await get_user_context(user_id)
-    inp = PipelineInput(
-        coin=coin,
-        user_id=user_id,
-        user_ctx=user,
-        account_state=user.account_state,
-        daily_loss_usdt=user.daily_loss_usdt or Decimal("0"),
-        weekly_loss_usdt=user.weekly_loss_usdt or Decimal("0"),
-        weekly_limit_usdt=user.weekly_limit_usdt or Decimal("500"),
-        consecutive_losses=user.consecutive_losses,
-        open_positions=user.open_positions or [],
-        portfolio_account=user.portfolio_account,
-    )
-    result = await pipeline.run(inp)
-    return {
-        "run_id": result.run_id,
-        "status": result.status,
-        "coin": result.coin,
-        "rejection_reason": result.rejection_reason,
-        "total_latency_ms": result.total_latency_ms,
-        "steps": [
-            {
-                "name": s.agent_name,
-                "status": s.status,
-                "latency_ms": s.latency_ms,
-                "error": s.error,
-            }
-            for s in result.steps
-        ],
-    }
+        user = await get_user_context(user_id)
+        inp = PipelineInput(
+            coin=coin,
+            user_id=user_id,
+            user_ctx=user,
+            account_state=user.account_state,
+            daily_loss_usdt=user.daily_loss_usdt or Decimal("0"),
+            weekly_loss_usdt=user.weekly_loss_usdt or Decimal("0"),
+            weekly_limit_usdt=user.weekly_limit_usdt or Decimal("500"),
+            consecutive_losses=user.consecutive_losses,
+            open_positions=user.open_positions or [],
+            portfolio_account=user.portfolio_account,
+        )
+        result = await pipeline.run(inp)
+        return {
+            "run_id": result.run_id,
+            "status": result.status,
+            "coin": result.coin,
+            "rejection_reason": result.rejection_reason,
+            "total_latency_ms": result.total_latency_ms,
+            "steps": [
+                {
+                    "name": s.agent_name,
+                    "status": s.status,
+                    "latency_ms": s.latency_ms,
+                    "error": s.error,
+                }
+                for s in result.steps
+            ],
+        }
+    finally:
+        await redis_client.aclose()
 
 
 @celery_app.task(

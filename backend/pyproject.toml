@@ -28,6 +28,9 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "--cov=app --cov-report=term-missing --cov-fail-under=80"
+markers = [
+    "testnet: tests that hit Binance Testnet (requires TESTNET_API_KEY / TESTNET_API_SECRET)",
+]
 
 [tool.coverage.run]
 source = ["app"]

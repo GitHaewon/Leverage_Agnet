@@ -1,0 +1,49 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    service: ai-trading-copilot
+    environment: ${APP_ENV:-development}
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+scrape_configs:
+
+  # ── FastAPI Backend ──────────────────────────────────────────────────────────
+  - job_name: trading-copilot-backend
+    metrics_path: /api/v1/metrics
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - backend:8000
+        labels:
+          component: backend
+
+  # ── Celery Worker (Prometheus exporter 없음 → 태스크 신호로 직접 Push 방식)
+  # Celery 워커는 별도 포트를 열지 않고 backend가 메트릭을 대신 노출한다.
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  # redis_exporter 컨테이너가 있으면 아래 주석 해제
+  # - job_name: redis
+  #   static_configs:
+  #     - targets:
+  #         - redis-exporter:9121
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  # postgres_exporter 컨테이너가 있으면 아래 주석 해제
+  # - job_name: postgres
+  #   static_configs:
+  #     - targets:
+  #         - postgres-exporter:9187
+
+  # ── Prometheus 자체 모니터링 ────────────────────────────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090

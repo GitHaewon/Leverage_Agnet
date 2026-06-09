@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str
     CLAUDE_MODEL: str = "claude-sonnet-4-6"
 
+    # ── Memory Layer (Qdrant) ──────────────────────────────────────────────────
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: str = ""
+    # 한국어 지원 다국어 임베딩 모델 — fastembed 지원 모델 중 선택
+    # 변경 시 MEMORY_VECTOR_SIZE도 함께 수정 필요
+    MEMORY_EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    MEMORY_VECTOR_SIZE: int = 384
+
     # ── Stripe ─────────────────────────────────────────────────────────────────
     STRIPE_SECRET_KEY: str
     STRIPE_WEBHOOK_SECRET: str
