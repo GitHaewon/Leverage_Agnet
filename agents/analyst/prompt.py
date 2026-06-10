@@ -57,13 +57,14 @@ def _format_indicators(indicators: dict) -> str:
     lines = []
     for key, val in indicators.items():
         if isinstance(val, dict):
-            sub = ", ".join(
-                f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
+            # 중괄호·쉼표 제거 → space-separated k=v 형식으로 토큰 절감
+            sub = " ".join(
+                f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}"
                 for k, v in val.items()
             )
-            lines.append(f"  {key}: {{{sub}}}")
+            lines.append(f"  {key}: {sub}")
         elif isinstance(val, float):
-            lines.append(f"  {key}: {val:.4f}")
+            lines.append(f"  {key}: {val:.3f}")
         else:
             lines.append(f"  {key}: {val}")
     return "\n".join(lines)
@@ -79,7 +80,7 @@ def _format_news(news_items: list[dict]) -> str:
     if not news_items:
         return "  (no recent news)"
     lines = []
-    for item in news_items[:5]:
+    for item in news_items[:3]:
         sentiment = str(item.get("sentiment", "neutral")).upper()
         headline = item.get("headline", "")
         source = item.get("source", "")

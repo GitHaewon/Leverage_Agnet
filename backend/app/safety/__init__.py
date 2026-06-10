@@ -24,12 +24,14 @@ Live Trading Safety Layer — 공개 API.
     store = InMemorySafetyStateStore()  # 테스트 전용 — 재시작 시 초기화됨
     gate  = SafetyGate(store, config)
 """
+from .adapter import SafetyGateAdapter
 from .gate import SafetyGate
 from .state import InMemorySafetyStateStore, RedisSafetyStateStore, SafetyStateStore
 from .types import AlertLevel, HaltReason, SafetyCheckResult, SafetyConfig
 
 __all__ = [
     "SafetyGate",
+    "SafetyGateAdapter",
     "SafetyConfig",
     "SafetyCheckResult",
     "HaltReason",

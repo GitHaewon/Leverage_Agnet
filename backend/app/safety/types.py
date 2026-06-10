@@ -86,3 +86,11 @@ class DrawdownState:
     current_balance: float = 0.0
     is_halted:       bool  = False
     warning_sent:    bool  = False
+
+
+@dataclass
+class UserHaltStatus:
+    """SafetyGate.get_halt_status() 반환 타입 — 읽기 전용 kill switch 상태."""
+    is_halted:   bool
+    halt_reason: Optional[HaltReason] = None
+    halt_until:  Optional[datetime]   = None

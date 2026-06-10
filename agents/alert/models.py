@@ -65,12 +65,25 @@ class LiquidationRiskEvent:
     event_type: str = field(default="liquidation_risk", init=False)
 
 
+@dataclass
+class EmergencyClosedEvent:
+    """TP/SL 설정 실패 → 긴급 시장가 청산 완료."""
+    symbol: str
+    direction: Literal["LONG", "SHORT"]
+    entry_price: Decimal
+    exit_price: Decimal       # 긴급 청산 시장가 체결가
+    reason: str
+    triggered_at: datetime
+    event_type: str = field(default="emergency_closed", init=False)
+
+
 AlertEvent = Union[
     OrderFilledEvent,
     OrderFailedEvent,
     MaxDailyLossEvent,
     KillSwitchEvent,
     LiquidationRiskEvent,
+    EmergencyClosedEvent,
 ]
 
 

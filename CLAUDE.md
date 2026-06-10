@@ -43,7 +43,7 @@ Backend:
   - Redis Streams (메시지 브로커)
 
 AI:
-  - Claude Sonnet API (Anthropic)  ← 유일한 승인 모델
+  - OpenAI GPT API  ← 유일한 승인 모델
   - LangGraph (에이전트 오케스트레이션)
   - pandas-ta (기술적 지표)
   - FinBERT (감성 분석)
@@ -98,12 +98,10 @@ ai-trading-copilot/
 
 ```python
 # 유일한 승인 모델
-MODEL = "claude-sonnet-4-6"
+MODEL = "gpt-5"
 
 # 금지 (절대 사용하지 않는다)
-# - claude-opus-*
-# - claude-haiku-*
-# - gpt-*
+# - claude-*
 # - gemini-*
 # - 로컬 LLM
 ```
@@ -112,10 +110,10 @@ MODEL = "claude-sonnet-4-6"
 
 ```python
 # 올바른 설계
-model = settings.CLAUDE_MODEL  # 환경변수에서 읽기
+model = settings.OPENAI_MODEL  # 환경변수에서 읽기
 
 # 금지
-model = "claude-opus-4-8"  # 하드코딩 금지
+model = "gpt-4o"  # 하드코딩 금지
 ```
 
 ---
@@ -152,7 +150,7 @@ Sentiment Agent          (뉴스, Fear & Greed)
         ↓
 Market Structure Agent   (OI, Funding Rate, Long/Short 비율)
         ↓
-Synthesis Agent          (Claude Sonnet — 종합 판단, 신뢰도 계산)
+Synthesis Agent          (GPT-5 — 종합 판단, 신뢰도 계산)
         ↓
 Risk Manager Agent       (포지션 사이징, 레버리지 검증)  ← 최종 안전 게이트
         ↓
@@ -229,7 +227,8 @@ logger.info(f"API Key: {api_key}")               # 절대 금지
 
 ```bash
 # .env.example (값 없이 키 이름만)
-ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-5
 BINANCE_ENCRYPT_KEY=
 DATABASE_URL=
 REDIS_URL=
@@ -329,7 +328,7 @@ Binance 통합 테스트:
 ```
 1. .env 파일 git 커밋 절대 금지
 2. API Key, Secret, Token 소스코드 하드코딩 절대 금지
-3. AI 모델: claude-sonnet-4-6 외 사용 금지 (CTO 승인 없이)
+3. AI 모델: gpt-5 (OPENAI_MODEL 환경변수 기준) 외 사용 금지 (CTO 승인 없이)
 4. 손절(Stop Loss) 없는 자동 주문 실행 금지
 5. 출금 권한 Binance API Key 등록 허용 금지
 6. Raw SQL + 문자열 포맷팅 조합 금지 (SQL Injection)

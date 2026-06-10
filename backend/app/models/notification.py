@@ -42,8 +42,9 @@ class Notification(Base, PrimaryKeyMixin):
     body: Mapped[str] = mapped_column(Text, nullable=False)
 
     # 느슨한 결합 — 관련 엔티티 UUID를 JSON에 저장 (FK 없음)
-    metadata: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default="{}"
+    # "metadata" is reserved by SQLAlchemy 2.0.38+; DB column kept as "metadata"
+    extra_data: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, server_default="{}"
     )
 
     # ── 발송 상태 ────────────────────────────────────────────────────────────────

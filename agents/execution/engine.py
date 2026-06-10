@@ -4,13 +4,15 @@ ExecutionEngine — Signal → Risk Validation → Position Sizing → Order Exe
 핵심 규칙:
   1. Risk Engine 승인 없이는 주문 절대 금지 (AGENTS.md §7, CLAUDE.md 절대 규칙)
   2. LIVE_TRADING_ENABLED=false 기본값 — 실수로 실거래 실행 방지
-  3. entry 체결 후 TP/SL 실패 시 tp_sl_failed=True 반환 (호출자가 긴급 청산)
-  4. 예외 발생 시 항상 거부 (안전 우선 원칙)
+  3. SafetyGate 거부 시 절대 주문 금지 (손실 한도 / 비상 중단 / 연결 오류)
+  4. entry 체결 후 TP/SL 실패 시 tp_sl_failed=True 반환 (호출자가 긴급 청산)
+  5. 예외 발생 시 항상 거부 (안전 우선 원칙)
 
 파이프라인:
   Signal
     → RiskValidatorProtocol.validate()   (HOLD / SL / R:R / 손실 한도 / 사이징 등)
-    → LIVE_TRADING_ENABLED gate
+    → LIVE_TRADING_ENABLED gate          (paper 모드 → 여기서 종료)
+    → SafetyGateProtocol.check_order_allowed()  (live 전용 최종 안전 게이트)
     → gateway.place_order(entry)
     → gateway.place_order(take_profit)
     → gateway.place_order(stop_loss)
@@ -27,6 +29,7 @@ from agents.execution.models import (
     OrderGatewayProtocol,
     OrderTicket,
     RiskValidatorProtocol,
+    SafetyGateProtocol,
 )
 from agents.risk.models import RawSignal, ValidationResult
 
@@ -85,6 +88,24 @@ def build_sl_ticket(signal: RawSignal, validation: ValidationResult) -> OrderTic
     )
 
 
+def build_emergency_close_ticket(signal: RawSignal, quantity: "Decimal") -> OrderTicket:
+    """
+    긴급 청산 주문 — 시장가, reduce_only=True.
+
+    TP/SL 재시도까지 실패 시 미보호 포지션을 즉시 청산하기 위해 사용한다.
+    """
+    from decimal import Decimal as _Decimal
+    return OrderTicket(
+        symbol=signal.symbol,
+        side=_CLOSE_SIDE[signal.direction],
+        order_type="MARKET",
+        quantity=quantity,
+        price=signal.entry_price,   # 참조가 (시장가 주문이므로 실제 체결가와 다를 수 있음)
+        reduce_only=True,
+        purpose="emergency_close",
+    )
+
+
 # ── 실행 엔진 ─────────────────────────────────────────────────────────────────────
 
 class ExecutionEngine:
@@ -105,16 +126,24 @@ class ExecutionEngine:
         gateway: OrderGatewayProtocol,
         live_trading_enabled: bool = False,
         mode: Literal["paper", "testnet", "live"] = "paper",
+        safety_gate: SafetyGateProtocol | None = None,
     ) -> None:
         # live_trading_enabled=True인데 mode가 paper이면 설정 오류
         if live_trading_enabled and mode == "paper":
             raise ValueError(
                 "live_trading_enabled=True이면 mode는 'testnet' 또는 'live'여야 합니다."
             )
+        # live 모드인데 safety_gate 없으면 경고 (주문이 Safety Layer를 우회하게 됨)
+        if live_trading_enabled and safety_gate is None:
+            logger.warning(
+                "ExecutionEngine: live_trading_enabled=True but safety_gate is None. "
+                "Orders will bypass SafetyGate — configure SafetyGateAdapter."
+            )
         self._validator = risk_validator
         self._gateway = gateway
         self._live = live_trading_enabled
         self._mode: Literal["paper", "testnet", "live"] = mode
+        self._safety_gate = safety_gate
 
     async def execute(self, req: ExecutionRequest) -> ExecutionResult:
         """
@@ -173,12 +202,32 @@ class ExecutionEngine:
                     warnings=list(validation.warnings),
                 )
 
+            # ── STEP 2.5: SafetyGate 최종 확인 ──────────────────────────────
+            # live 모드 전용. paper 모드는 STEP 2에서 이미 return되어 여기 도달 불가.
+            # SafetyGate 거부 시 절대 주문 금지 — gateway.place_order() 호출 불가.
+            if self._safety_gate is not None:
+                safety = await self._safety_gate.check_order_allowed(
+                    req.user_ctx.user_id
+                )
+                if not safety.allowed:
+                    logger.warning(
+                        "SafetyGate blocked order user_id=%s code=%s msg=%s",
+                        req.user_ctx.user_id,
+                        safety.rejection_code,
+                        safety.message,
+                    )
+                    return ExecutionResult(
+                        approved=False,
+                        executed=False,
+                        mode=self._mode,
+                        rejection_code=safety.rejection_code or "SAFETY_GATE_BLOCKED",
+                        rejection_reason=safety.message or "SafetyGate blocked this order",
+                    )
+
             # ── STEP 3: 주문 실행 (entry → TP → SL) ──────────────────────────
             entry_ticket = build_entry_ticket(req.signal, validation)
             entry_filled: FilledOrder = await self._gateway.place_order(entry_ticket)
 
-            # entry 체결 후 TP/SL 실패 시 tp_sl_failed=True 반환
-            # 호출자(Application Layer)가 긴급 청산 처리 책임
             tp_filled: FilledOrder | None = None
             sl_filled: FilledOrder | None = None
             tp_sl_failed = False
@@ -201,13 +250,80 @@ class ExecutionEngine:
                 )
                 tp_sl_failed = True
 
+            # ── STEP 3a: TP/SL 실패 → 재시도 1회 → 긴급 청산 ──────────────
+            if tp_sl_failed:
+                logger.warning(
+                    "TP/SL failed, retrying once user_id=%s entry_id=%s",
+                    req.user_ctx.user_id, entry_filled.exchange_order_id,
+                )
+                try:
+                    if tp_filled is None:
+                        tp_filled = await self._gateway.place_order(
+                            build_tp_ticket(req.signal, validation)
+                        )
+                    if sl_filled is None:
+                        sl_filled = await self._gateway.place_order(
+                            build_sl_ticket(req.signal, validation)
+                        )
+                    tp_sl_failed = False
+                    logger.info(
+                        "TP/SL retry succeeded user_id=%s entry_id=%s",
+                        req.user_ctx.user_id, entry_filled.exchange_order_id,
+                    )
+                except Exception as retry_exc:
+                    # 재시도도 실패 → 미보호 포지션 → 긴급 청산 필수
+                    logger.error(
+                        "TP/SL retry failed, initiating emergency close "
+                        "user_id=%s entry_id=%s error=%s",
+                        req.user_ctx.user_id,
+                        entry_filled.exchange_order_id,
+                        retry_exc,
+                        exc_info=True,
+                    )
+                    emergency_order: FilledOrder | None = None
+                    emergency_failed = False
+                    try:
+                        close_ticket = build_emergency_close_ticket(
+                            req.signal, entry_filled.quantity
+                        )
+                        emergency_order = await self._gateway.place_order(close_ticket)
+                        logger.warning(
+                            "Emergency close executed user_id=%s "
+                            "entry_id=%s close_id=%s",
+                            req.user_ctx.user_id,
+                            entry_filled.exchange_order_id,
+                            emergency_order.exchange_order_id,
+                        )
+                    except Exception as emergency_exc:
+                        emergency_failed = True
+                        logger.critical(
+                            "EMERGENCY_CLOSE_FAILED "
+                            "user_id=%s entry_id=%s error=%s "
+                            "— MANUAL INTERVENTION REQUIRED",
+                            req.user_ctx.user_id,
+                            entry_filled.exchange_order_id,
+                            emergency_exc,
+                            exc_info=True,
+                        )
+
+                    return ExecutionResult(
+                        approved=True,
+                        executed=True,
+                        mode=self._mode,
+                        validation=validation,
+                        entry_order=entry_filled,
+                        tp_sl_failed=True,
+                        emergency_close_order=emergency_order,
+                        emergency_close_failed=emergency_failed,
+                        warnings=list(validation.warnings),
+                    )
+
             logger.info(
                 "Execution completed user_id=%s mode=%s "
-                "entry_id=%s qty=%s price=%s tp_sl_failed=%s",
+                "entry_id=%s qty=%s price=%s",
                 req.user_ctx.user_id, self._mode,
                 entry_filled.exchange_order_id,
                 entry_filled.quantity, entry_filled.avg_fill_price,
-                tp_sl_failed,
             )
 
             return ExecutionResult(
@@ -218,7 +334,7 @@ class ExecutionEngine:
                 entry_order=entry_filled,
                 tp_order=tp_filled,
                 sl_order=sl_filled,
-                tp_sl_failed=tp_sl_failed,
+                tp_sl_failed=False,
                 warnings=list(validation.warnings),
             )
 

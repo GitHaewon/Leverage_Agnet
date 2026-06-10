@@ -6,6 +6,7 @@ from agents.alert.formatter import format_alert
 from agents.alert.models import (
     AlertEvent,
     AlertResult,
+    EmergencyClosedEvent,
     KillSwitchEvent,
     LiquidationRiskEvent,
     MaxDailyLossEvent,
@@ -18,6 +19,7 @@ __all__ = [
     "AlertDispatcher",
     "AlertEvent",
     "AlertResult",
+    "EmergencyClosedEvent",
     "KillSwitchEvent",
     "LiquidationRiskEvent",
     "MaxDailyLossEvent",

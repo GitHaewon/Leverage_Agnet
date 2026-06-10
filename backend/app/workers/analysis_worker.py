@@ -27,18 +27,20 @@ logger = logging.getLogger(__name__)
 async def _build_deps(
     redis: "Any",
     user_id: uuid.UUID | None = None,
+    session: "Any | None" = None,
 ) -> "OrchestratorDeps":
     """
     실제 에이전트를 OrchestratorPipeline에 주입한다.
 
-    user_id가 주어지고 LIVE_TRADING_ENABLED=true이면 BinanceGateway를 사용.
-    그 외에는 PaperGateway (기본값, 실거래 없음).
+    LIVE_TRADING_ENABLED=true + user_id : BinanceGateway (실거래/테스트넷)
+    SHADOW_TRADING_ENABLED=true         : ShadowExecutionEngine (가상 체결 기록)
+    그 외 (paper)                        : ExecutionEngine + PaperGateway
     """
     from agents.orchestrator.pipeline import OrchestratorDeps
     from agents.market_data.agent import MarketDataAgent
     from agents.technical_analysis.agent import TechnicalAnalysisAgent
     from agents.strategy.engine import StrategyEngine
-    from agents.analyst.agent import AnalystAgent, AnthropicClient
+    from agents.analyst.agent import AnalystAgent, OpenAIClient
     from agents.risk.engine import RiskEngine
     from agents.portfolio.engine import PortfolioEngine
     from agents.position_manager.engine import PositionManagerEngine
@@ -46,37 +48,61 @@ async def _build_deps(
     from agents.execution.gateway import PaperGateway
 
     risk_engine = RiskEngine(redis=redis)
+    safety_gate = None
 
     if settings.LIVE_TRADING_ENABLED and user_id is not None:
         from app.gateways.binance_gateway import BinanceGateway
+        from app.safety import RedisSafetyStateStore, SafetyConfig, SafetyGate
+        from app.safety.adapter import SafetyGateAdapter
         gateway = BinanceGateway(
             user_id=user_id,
             is_testnet=settings.BINANCE_TESTNET,
         )
-        live = True
         mode = "testnet" if settings.BINANCE_TESTNET else "live"
+        safety_gate = SafetyGateAdapter(
+            SafetyGate(
+                store=RedisSafetyStateStore(redis),
+                config=SafetyConfig(live_trading_enabled=True),
+            )
+        )
+        execution = ExecutionEngine(
+            risk_validator=risk_engine,
+            gateway=gateway,
+            live_trading_enabled=True,
+            mode=mode,
+            safety_gate=safety_gate,
+        )
+    elif settings.SHADOW_TRADING_ENABLED:
+        # Shadow mode: ShadowExecutionEngine — Risk 검증 동일, 가상 체결을 DB에 저장
+        from agents.shadow.execution import ShadowExecutionEngine
+        from app.repositories.shadow_trade_repository import ShadowTradeRepository
+        execution = ShadowExecutionEngine(
+            risk_validator=risk_engine,
+            store=ShadowTradeRepository(session),
+        )
     else:
-        gateway = PaperGateway()
-        live = False
-        mode = "paper"
+        # Paper mode: 주문 실행 없음, 시그널 로직 검증 전용
+        execution = ExecutionEngine(
+            risk_validator=risk_engine,
+            gateway=PaperGateway(),
+            live_trading_enabled=False,
+            mode="paper",
+            safety_gate=None,
+        )
 
     return OrchestratorDeps(
         market_data=MarketDataAgent(redis=redis),
         technical=TechnicalAnalysisAgent(),
         strategy=StrategyEngine(),
         analyst=AnalystAgent(
-            client=AnthropicClient(api_key=settings.ANTHROPIC_API_KEY),
-            model=settings.CLAUDE_MODEL,
+            client=OpenAIClient(api_key=settings.OPENAI_API_KEY),
+            model=settings.OPENAI_MODEL,
         ),
         risk=risk_engine,
         portfolio=PortfolioEngine(),
         position_manager=PositionManagerEngine(),
-        execution=ExecutionEngine(
-            risk_validator=risk_engine,
-            gateway=gateway,
-            live_trading_enabled=live,
-            mode=mode,
-        ),
+        execution=execution,
+        post_trade_hook=safety_gate,  # SafetyGateAdapter: 체결 후 kill switch 손실 누적
     )
 
 
@@ -111,19 +137,18 @@ async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
         users = await get_auto_trading_users()
         logger.info("analysis_cycle started: %d users × %d symbols", len(users), len(symbols))
 
-        # Paper mode: AI 에이전트는 사용자 무관 → 파이프라인 한 번만 구성
-        # Live/Testnet: BinanceGateway가 user_id에 의존 → 사용자별로 재구성
+        # Paper mode: AI 에이전트는 사용자 무관 → 파이프라인 한 번만 구성 (최적화)
+        # Shadow/Live mode: 세션/게이트웨이가 사용자·심볼별로 다름 → 심볼별 재구성
         shared_pipeline: OrchestratorPipeline | None = None
-        if not settings.LIVE_TRADING_ENABLED:
+        if not settings.LIVE_TRADING_ENABLED and not settings.SHADOW_TRADING_ENABLED:
             shared_deps = await _build_deps(redis_client)
             shared_pipeline = OrchestratorPipeline(shared_deps)
 
         for user in users:
+            live_pipeline: OrchestratorPipeline | None = None
             if settings.LIVE_TRADING_ENABLED:
                 user_deps = await _build_deps(redis_client, user_id=user.id)
-                pipeline = OrchestratorPipeline(user_deps)
-            else:
-                pipeline = shared_pipeline  # type: ignore[assignment]
+                live_pipeline = OrchestratorPipeline(user_deps)
 
             for symbol in symbols:
                 coin = symbol.replace("USDT", "")
@@ -140,7 +165,17 @@ async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
                     portfolio_account=user.portfolio_account,
                 )
                 try:
-                    result = await pipeline.run(inp)
+                    if settings.LIVE_TRADING_ENABLED:
+                        result = await live_pipeline.run(inp)  # type: ignore[union-attr]
+                    elif settings.SHADOW_TRADING_ENABLED:
+                        # 심볼별 독립 세션: 한 심볼 실패가 다른 심볼 저장에 영향 없음
+                        from app.core.database import AsyncSessionLocal
+                        async with AsyncSessionLocal() as session:
+                            shadow_deps = await _build_deps(redis_client, session=session)
+                            result = await OrchestratorPipeline(shadow_deps).run(inp)
+                            await session.commit()
+                    else:
+                        result = await shared_pipeline.run(inp)  # type: ignore[union-attr]
                     results[f"{user.id}:{coin}"] = {
                         "status": result.status,
                         "run_id": result.run_id,
@@ -191,9 +226,6 @@ async def _run_single_async(
     redis_client = aioredis.from_url(str(settings.REDIS_URL), decode_responses=True)
     try:
         uid = uuid.UUID(user_id)
-        deps = await _build_deps(redis_client, user_id=uid)
-        pipeline = OrchestratorPipeline(deps)
-
         user = await get_user_context(user_id)
         inp = PipelineInput(
             coin=coin,
@@ -207,7 +239,16 @@ async def _run_single_async(
             open_positions=user.open_positions or [],
             portfolio_account=user.portfolio_account,
         )
-        result = await pipeline.run(inp)
+
+        if settings.SHADOW_TRADING_ENABLED and not settings.LIVE_TRADING_ENABLED:
+            from app.core.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                deps = await _build_deps(redis_client, session=session)
+                result = await OrchestratorPipeline(deps).run(inp)
+                await session.commit()
+        else:
+            deps = await _build_deps(redis_client, user_id=uid)
+            result = await OrchestratorPipeline(deps).run(inp)
         return {
             "run_id": result.run_id,
             "status": result.status,

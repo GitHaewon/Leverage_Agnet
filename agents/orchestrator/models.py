@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Optional
 
@@ -28,11 +29,12 @@ class AgentStatus(str, Enum):
 
 
 class PipelineStatus(str, Enum):
-    RUNNING   = "running"
-    COMPLETED = "completed"   # Step 8(Execution)까지 완주
-    HOLD      = "hold"        # AI Analyst → HOLD 판정
-    REJECTED  = "rejected"    # Risk / Portfolio 거부
-    FAILED    = "failed"      # Critical Agent 실패
+    RUNNING          = "running"
+    COMPLETED        = "completed"          # Step 8(Execution)까지 완주
+    HOLD             = "hold"               # AI Analyst → HOLD 판정
+    REJECTED         = "rejected"           # Risk / Portfolio 거부
+    FAILED           = "failed"             # Critical Agent 실패
+    EMERGENCY_CLOSED = "emergency_closed"   # 진입 후 TP/SL 실패 → 긴급 청산 완료
 
 
 # ── AgentResult ───────────────────────────────────────────────────────────────
@@ -124,6 +126,9 @@ class PipelineContext:
     position_state: Any = None     # step 7  OpenResult
     execution_result: Any = None   # step 8  ExecutionResult
 
+    # step 4 이후 공유 시그널 (step 8 이후 PostTradeHook에서도 필요)
+    raw_signal: Any = None
+
     errors: list[dict] = field(default_factory=list)
 
 
@@ -161,3 +166,31 @@ class PipelineResult:
     @property
     def skipped_steps(self) -> list[AgentResult]:
         return [s for s in self.steps if s.status == AgentStatus.SKIPPED]
+
+
+# ── PostTradeEvent ────────────────────────────────────────────────────────────
+
+@dataclass
+class PostTradeEvent:
+    """
+    포지션 청산 완료 후 PostTradeHookProvider에 전달되는 이벤트.
+
+    realized_pnl_usdt: 실제 체결 fill price로 계산한 확정 P&L (USDT).
+      - 값이 있으면 (EMERGENCY_CLOSED 등 즉시 청산): SafetyGate가 이 값을 사용한다.
+      - None이면: max_loss_usdt (SL 기준 보수적 추정)를 fallback으로 사용한다.
+
+    max_loss_usdt: RiskEngine이 계산한 SL 기준 최대 손실 노출량.
+      realized_pnl_usdt가 없는 경우의 보수적 fallback이다.
+      포지션 모니터링 워커가 구현되면 이 값은 쓰이지 않는다.
+    """
+    user_id: str
+    coin: str
+    direction: str              # "LONG" | "SHORT"
+    entry_price: Decimal
+    quantity: Decimal
+    stop_loss: Optional[Decimal]
+    max_loss_usdt: float        # SL 기준 최대 손실 추정 (fallback)
+    period_start_balance: float  # 당일 00:00 UTC 기준 잔고 추정 = balance + daily_loss
+    week_start_balance: float    # 주간 시작 기준 잔고 추정  = balance + weekly_loss
+    current_balance: float       # 체결 시점 계좌 잔고
+    realized_pnl_usdt: Optional[float] = None  # fill price 기반 확정 P&L; None이면 max_loss_usdt 사용

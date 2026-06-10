@@ -97,7 +97,6 @@ class ExchangeAccount(Base, PrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
         Index(
             "idx_exchange_accounts_health_check",
             "last_health_check_at",
-            postgresql_nulls_first=True,
             postgresql_where="is_active = TRUE AND deleted_at IS NULL",
         ),
         Index(

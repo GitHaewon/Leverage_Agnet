@@ -27,7 +27,7 @@ from .drawdown import DrawdownProtection
 from .emergency import EmergencyShutdown
 from .kill_switch import DailyKillSwitch, WeeklyKillSwitch
 from .state import SafetyStateStore
-from .types import AlertLevel, HaltReason, SafetyCheckResult, SafetyConfig
+from .types import AlertLevel, HaltReason, SafetyCheckResult, SafetyConfig, UserHaltStatus
 
 logger = logging.getLogger(__name__)
 
@@ -184,3 +184,32 @@ class SafetyGate:
     async def reset_weekly_switch(self, user_id: str) -> None:
         """주간 킬스위치를 관리자가 수동으로 리셋한다."""
         await self._weekly_ks.reset(user_id)
+
+    async def get_halt_status(self, user_id: str) -> UserHaltStatus:
+        """
+        사용자 Kill switch 중단 상태를 읽기 전용으로 반환한다.
+
+        check_order_allowed()와 달리 Redis 상태를 변경하지 않는다.
+        드로우다운 / 긴급 중단은 포함하지 않는다 — 이 둘은 관리자 해제 대상이며
+        사용자가 직접 재개할 수 없다.
+        """
+        now   = self._daily_ks._now()
+        store = self._daily_ks._store
+
+        daily = await store.get_daily_kill_switch(user_id)
+        if daily.is_halted and (daily.halt_until is None or now < daily.halt_until):
+            return UserHaltStatus(
+                is_halted=True,
+                halt_reason=HaltReason.DAILY_LOSS_LIMIT,
+                halt_until=daily.halt_until,
+            )
+
+        weekly = await store.get_weekly_kill_switch(user_id)
+        if weekly.is_halted and (weekly.halt_until is None or now < weekly.halt_until):
+            return UserHaltStatus(
+                is_halted=True,
+                halt_reason=HaltReason.WEEKLY_LOSS_LIMIT,
+                halt_until=weekly.halt_until,
+            )
+
+        return UserHaltStatus(is_halted=False)

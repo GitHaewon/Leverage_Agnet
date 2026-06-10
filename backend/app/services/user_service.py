@@ -15,13 +15,17 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+import logging
+
+from sqlalchemy import select, update as sa_update
 from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal
 from app.models.enums import TradingModeType
 from app.models.user import User
 from app.models.user_settings import UserSettings
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -50,6 +54,53 @@ class UserTradingContext:
     def from_user(cls, user: User) -> "UserTradingContext":
         plan = user.plan.value if hasattr(user.plan, "value") else str(user.plan)
         return cls(id=user.id, plan=plan, settings=user.settings)
+
+
+async def enable_auto_trading(user_id: str) -> None:
+    """
+    Kill switch 해제 후 UserSettings.is_trading_active를 True로 복원한다.
+
+    is_trading_active=False인 경우에만 UPDATE를 실행(idempotent).
+    """
+    uid = uuid.UUID(user_id)
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            sa_update(UserSettings)
+            .where(UserSettings.user_id == uid)
+            .where(UserSettings.is_trading_active.is_(False))
+            .values(is_trading_active=True)
+            .execution_options(synchronize_session=False)
+        )
+        result = await session.execute(stmt)
+        await session.commit()
+    if result.rowcount > 0:
+        logger.info("auto_trading_enabled user_id=%s", user_id)
+
+
+async def disable_auto_trading(user_id: str, reason: str = "") -> None:
+    """
+    Kill switch 발동 시 UserSettings.is_trading_active를 False로 설정한다.
+
+    is_trading_active=True인 경우에만 UPDATE를 실행(idempotent).
+    이후 get_auto_trading_users()가 이 사용자를 즉시 제외하도록 보장한다.
+    재활성화는 사용자가 UI에서 수동으로 수행한다.
+    """
+    uid = uuid.UUID(user_id)
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            sa_update(UserSettings)
+            .where(UserSettings.user_id == uid)
+            .where(UserSettings.is_trading_active.is_(True))
+            .values(is_trading_active=False)
+            .execution_options(synchronize_session=False)
+        )
+        result = await session.execute(stmt)
+        await session.commit()
+    if result.rowcount > 0:
+        logger.warning(
+            "auto_trading_disabled user_id=%s reason=%s",
+            user_id, reason,
+        )
 
 
 async def get_auto_trading_users() -> list[UserTradingContext]:

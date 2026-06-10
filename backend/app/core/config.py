@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     # LIVE_TRADING_ENABLED: CTO 승인 없이 절대 true로 변경 금지
     LIVE_TRADING_ENABLED: bool = False
     MOCK_TRADING_MODE: bool = False        # True = 실제 API 호출 없음 (개발/테스트)
+    # SHADOW_TRADING_ENABLED: Risk 검증 통과 시그널을 가상 체결로 기록 (실제 주문 없음)
+    SHADOW_TRADING_ENABLED: bool = False
 
     # ── Binance URL ─────────────────────────────────────────────────────────────
     BINANCE_TESTNET_BASE_URL: str = "https://testnet.binancefuture.com"
@@ -58,9 +60,9 @@ class Settings(BaseSettings):
     # ── Trading Safety Constants ────────────────────────────────────────────────
     SYSTEM_MAX_LEVERAGE: int = 20          # 절대 상한 (TRADING_RULES.md §1.1)
 
-    # ── AI ─────────────────────────────────────────────────────────────────────
-    ANTHROPIC_API_KEY: str
-    CLAUDE_MODEL: str = "claude-sonnet-4-6"
+    # ── OpenAI ─────────────────────────────────────────────────────────────────
+    OPENAI_API_KEY: str
+    OPENAI_MODEL: str = "gpt-5"
 
     # ── Memory Layer (Qdrant) ──────────────────────────────────────────────────
     QDRANT_URL: str = "http://localhost:6333"
@@ -76,6 +78,7 @@ class Settings(BaseSettings):
 
     # ── Telegram ───────────────────────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str
+    TELEGRAM_CHAT_ID: str = ""  # AlertDispatcher에 주입할 기본 chat_id (사용자별 재정의 가능)
 
     # ── SMTP ───────────────────────────────────────────────────────────────────
     SMTP_HOST: str = "smtp.gmail.com"
@@ -97,15 +100,6 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, v: Any) -> list[str]:
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",")]
-        return v
-
-    @field_validator("CLAUDE_MODEL")
-    @classmethod
-    def validate_claude_model(cls, v: str) -> str:
-        # claude-sonnet-4-6 외 사용 금지 (CLAUDE.md 절대 규칙)
-        allowed = {"claude-sonnet-4-6"}
-        if v not in allowed:
-            raise ValueError(f"Unauthorized model: {v}. Only {allowed} is permitted.")
         return v
 
     @model_validator(mode="after")

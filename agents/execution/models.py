@@ -34,7 +34,7 @@ class OrderTicket:
     quantity: Decimal
     price: Decimal               # MARKET: 예상 체결가, TP/SL: 트리거가
     reduce_only: bool = False
-    purpose: Literal["entry", "take_profit", "stop_loss"] = "entry"
+    purpose: Literal["entry", "take_profit", "stop_loss", "emergency_close"] = "entry"
 
 
 @dataclass
@@ -42,7 +42,7 @@ class FilledOrder:
     """체결된 주문 결과."""
     exchange_order_id: str
     symbol: str
-    purpose: Literal["entry", "take_profit", "stop_loss"]
+    purpose: Literal["entry", "take_profit", "stop_loss", "emergency_close"]
     side: str
     order_type: str
     quantity: Decimal
@@ -95,6 +95,9 @@ class ExecutionResult:
     sl_order: FilledOrder | None = None
 
     tp_sl_failed: bool = False
+    # tp_sl_failed 후처리 결과
+    emergency_close_order: FilledOrder | None = None   # 긴급 청산 체결 (성공 시)
+    emergency_close_failed: bool = False               # 긴급 청산까지 실패 (CRITICAL)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -133,3 +136,29 @@ class OrderGatewayProtocol(Protocol):
     """
     async def place_order(self, ticket: OrderTicket) -> FilledOrder: ...
     async def cancel_all_orders(self, symbol: str) -> int: ...
+
+
+# ── Safety Gate 프로토콜 ───────────────────────────────────────────────────────────
+
+@dataclass
+class SafetyDecision:
+    """
+    SafetyGateProtocol.check_order_allowed() 반환 타입.
+
+    backend/app/safety 의존성 없이 agents/ 레이어에서 사용 가능하도록
+    SafetyCheckResult와 별도로 정의한다.
+    """
+    allowed: bool
+    rejection_code: str | None = None
+    message: str = ""
+
+
+class SafetyGateProtocol(Protocol):
+    """
+    Safety Gate 인터페이스.
+
+    구현체:
+      SafetyGateAdapter (backend/app/safety/adapter.py) — SafetyGate 래핑
+      StubSafetyGate — 단위 테스트 전용
+    """
+    async def check_order_allowed(self, user_id: str) -> SafetyDecision: ...

@@ -59,8 +59,18 @@ class ForbiddenError(AppError):
 
 
 class ConflictError(AppError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(code=code, message=message, status_code=status.HTTP_409_CONFLICT)
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code=code,
+            message=message,
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+        )
 
 
 class BillingError(AppError):

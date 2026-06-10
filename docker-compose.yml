@@ -5,7 +5,8 @@ services:
   # ── Backend (FastAPI) ─────────────────────────────────────────────────────────
   backend:
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
       target: development
     ports:
       - "8000:8000"
@@ -13,6 +14,7 @@ services:
       - .env
     volumes:
       - ./backend:/app
+      - ./agents:/app/agents
     depends_on:
       postgres:
         condition: service_healthy
@@ -25,13 +27,15 @@ services:
   # ── Celery Worker ─────────────────────────────────────────────────────────────
   celery_worker:
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
       target: development
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4
     env_file:
       - .env
     volumes:
       - ./backend:/app
+      - ./agents:/app/agents
     depends_on:
       postgres:
         condition: service_healthy
@@ -44,13 +48,15 @@ services:
   # ── Celery Beat (스케줄러) ─────────────────────────────────────────────────────
   celery_beat:
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
       target: development
     command: celery -A app.workers.celery_app beat --loglevel=info
     env_file:
       - .env
     volumes:
       - ./backend:/app
+      - ./agents:/app/agents
     depends_on:
       - celery_worker
     restart: unless-stopped

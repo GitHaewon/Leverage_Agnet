@@ -1,8 +1,8 @@
 """
-AI Analyst Agent — Claude Sonnet 기반 시장 분석.
+AI Analyst Agent — OpenAI GPT 기반 시장 분석.
 AI는 분석만 수행한다. 주문 권한 없음.
 """
-from agents.analyst.agent import AnalystAgent, AnthropicClient, AnthropicClientProtocol
+from agents.analyst.agent import AnalystAgent, OpenAIClient, OpenAIClientProtocol
 from agents.analyst.models import (
     AnalysisDecision,
     AnalystResult,
@@ -17,8 +17,8 @@ __all__ = [
     "AnalysisDecision",
     "AnalystAgent",
     "AnalystResult",
-    "AnthropicClient",
-    "AnthropicClientProtocol",
+    "OpenAIClient",
+    "OpenAIClientProtocol",
     "MarketContext",
     "SYSTEM_PROMPT",
     "StrategyContext",

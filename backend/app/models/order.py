@@ -128,7 +128,6 @@ class Order(Base, PrimaryKeyMixin, TimestampMixin):
         Index(
             "idx_orders_retry",
             "last_retry_at", "retry_count",
-            postgresql_nulls_first=True,
             postgresql_where="status = 'rejected' AND retry_count < max_retries",
         ),
     )

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from agents.alert.models import (
     AlertEvent,
+    EmergencyClosedEvent,
     KillSwitchEvent,
     LiquidationRiskEvent,
     MaxDailyLossEvent,
@@ -97,6 +98,19 @@ def format_liquidation_risk(event: LiquidationRiskEvent) -> str:
     ])
 
 
+def format_emergency_closed(event: EmergencyClosedEvent) -> str:
+    direction_sym = _DIRECTION_SYMBOL[event.direction]
+    return "\n".join([
+        "🚨 [긴급 청산 완료]",
+        _SEP,
+        f"심볼: {event.symbol} {direction_sym} {event.direction}",
+        f"진입가: {_fmt_price(event.entry_price)}",
+        f"청산가: {_fmt_price(event.exit_price)}",
+        f"사유: {event.reason}",
+        f"발동 시각: {_fmt_dt(event.triggered_at)}",
+    ])
+
+
 def format_alert(event: AlertEvent) -> str:
     """이벤트 타입에 따라 올바른 포맷터로 라우팅."""
     if isinstance(event, OrderFilledEvent):
@@ -109,4 +123,6 @@ def format_alert(event: AlertEvent) -> str:
         return format_kill_switch(event)
     if isinstance(event, LiquidationRiskEvent):
         return format_liquidation_risk(event)
+    if isinstance(event, EmergencyClosedEvent):
+        return format_emergency_closed(event)
     raise ValueError(f"알 수 없는 이벤트 타입: {type(event)}")
