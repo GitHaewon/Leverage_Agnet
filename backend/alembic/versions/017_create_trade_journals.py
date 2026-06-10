@@ -5,6 +5,7 @@ Revises: 016
 Create Date: 2026-06-08
 """
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgENUM
 import sqlalchemy as sa
 
 revision = "017"
@@ -28,7 +29,7 @@ def upgrade() -> None:
         # ── 거래 식별 ─────────────────────────────────────────────────────────
         sa.Column("symbol", sa.String(20), nullable=False),
         sa.Column("coin", sa.String(10), nullable=False),
-        sa.Column("direction", sa.Enum(name="signal_direction_type", create_type=False), nullable=False),
+        sa.Column("direction", PgENUM(name="signal_direction_type", create_type=False), nullable=False),
         sa.Column("leverage", sa.SmallInteger(), nullable=False),
         sa.Column("is_ai_trade", sa.Boolean(), nullable=False, server_default="true"),
         # ── 저널 핵심 필드 ────────────────────────────────────────────────────
@@ -41,7 +42,7 @@ def upgrade() -> None:
         sa.Column("net_pnl", sa.Numeric(20, 8), nullable=False),
         sa.Column("pnl_percentage", sa.Numeric(10, 4), nullable=False),
         sa.Column("duration_seconds", sa.Integer(), nullable=False),
-        sa.Column("close_reason", sa.Enum(name="close_reason_type", create_type=False), nullable=False),
+        sa.Column("close_reason", PgENUM(name="close_reason_type", create_type=False), nullable=False),
         # ── 사용자 주석 (후행 편집 가능) ──────────────────────────────────────
         sa.Column("user_notes", sa.Text(), nullable=True),
         # ── 타임스탬프 ────────────────────────────────────────────────────────

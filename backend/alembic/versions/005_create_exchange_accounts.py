@@ -6,6 +6,7 @@ Create Date: 2026-06-05
 """
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgENUM
 from sqlalchemy.dialects.postgresql import ARRAY, INET
 
 revision = "005"
@@ -19,7 +20,7 @@ def upgrade() -> None:
         "exchange_accounts",
         sa.Column("id", sa.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column("user_id", sa.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("exchange", sa.Enum(name="exchange_type", create_type=False), nullable=False, server_default="binance"),
+        sa.Column("exchange", PgENUM(name="exchange_type", create_type=False), nullable=False, server_default="binance"),
         sa.Column("label", sa.String(100), nullable=False, server_default="Main Account"),
         sa.Column("encrypted_api_key", sa.Text, nullable=False),
         sa.Column("encrypted_api_secret", sa.Text, nullable=False),
@@ -28,7 +29,7 @@ def upgrade() -> None:
         sa.Column("is_testnet", sa.Boolean, nullable=False, server_default="false"),
         sa.Column("is_active", sa.Boolean, nullable=False, server_default="true"),
         sa.Column("permissions", ARRAY(sa.Text()), nullable=False, server_default="{}"),
-        sa.Column("health_status", sa.Enum(name="health_status_type", create_type=False), nullable=False, server_default="healthy"),
+        sa.Column("health_status", PgENUM(name="health_status_type", create_type=False), nullable=False, server_default="healthy"),
         sa.Column("consecutive_failures", sa.SmallInteger, nullable=False, server_default="0"),
         sa.Column("last_health_check_at", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.Column("last_error_message", sa.Text, nullable=True),

@@ -13,6 +13,7 @@ celery_app = Celery(
     backend=str(settings.REDIS_URL),
     include=[
         "app.workers.analysis_worker",
+        "app.workers.shadow_monitor_worker",
         "app.workers.notification_worker",
         "app.workers.reflection_worker",
         "app.workers.coaching_worker",
@@ -41,6 +42,10 @@ celery_app.conf.update(
         "signal-expiry-check-every-min": {
             "task": "app.workers.analysis_worker.expire_signals",
             "schedule": 60.0,
+        },
+        "shadow-monitor-every-30s": {
+            "task": "app.workers.shadow_monitor_worker.run_shadow_monitor",
+            "schedule": 30.0,
         },
         "weekly-coaching-report-mon-09-kst": {
             "task": "app.workers.coaching_worker.run_weekly_coaching_all_users",

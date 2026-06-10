@@ -93,7 +93,8 @@ def upgrade() -> None:
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
-
+    """)
+    op.execute("""
         CREATE TRIGGER trg_shadow_trades_updated_at
         BEFORE UPDATE ON shadow_trades
         FOR EACH ROW EXECUTE FUNCTION update_shadow_trades_updated_at();

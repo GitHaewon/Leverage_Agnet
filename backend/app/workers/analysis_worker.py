@@ -90,6 +90,16 @@ async def _build_deps(
             safety_gate=None,
         )
 
+    # AlertDispatcher: bot_token + chat_id가 모두 설정된 경우에만 생성
+    alert_dispatcher = None
+    if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
+        from agents.alert.dispatcher import AlertDispatcher
+        from agents.alert.sender import TelegramSender
+        alert_dispatcher = AlertDispatcher(
+            sender=TelegramSender(bot_token=settings.TELEGRAM_BOT_TOKEN),
+            chat_id=settings.TELEGRAM_CHAT_ID,
+        )
+
     return OrchestratorDeps(
         market_data=MarketDataAgent(redis=redis),
         technical=TechnicalAnalysisAgent(),
@@ -103,6 +113,7 @@ async def _build_deps(
         position_manager=PositionManagerEngine(),
         execution=execution,
         post_trade_hook=safety_gate,  # SafetyGateAdapter: 체결 후 kill switch 손실 누적
+        alert_dispatcher=alert_dispatcher,
     )
 
 

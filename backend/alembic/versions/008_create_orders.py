@@ -6,6 +6,7 @@ Create Date: 2026-06-05
 """
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgENUM
 
 revision = "008"
 down_revision = "007"
@@ -23,9 +24,9 @@ def upgrade() -> None:
         sa.Column("exchange_order_id", sa.String(100), nullable=True),
         sa.Column("client_order_id", sa.String(100), nullable=True),
         sa.Column("symbol", sa.String(20), nullable=False),
-        sa.Column("order_type", sa.Enum(name="order_type_enum", create_type=False), nullable=False),
-        sa.Column("side", sa.Enum(name="order_side_type", create_type=False), nullable=False),
-        sa.Column("purpose", sa.Enum(name="order_purpose_type", create_type=False), nullable=False),
+        sa.Column("order_type", PgENUM(name="order_type_enum", create_type=False), nullable=False),
+        sa.Column("side", PgENUM(name="order_side_type", create_type=False), nullable=False),
+        sa.Column("purpose", PgENUM(name="order_purpose_type", create_type=False), nullable=False),
         sa.Column("quantity", sa.Numeric(20, 8), nullable=False),
         sa.Column("price", sa.Numeric(20, 8), nullable=True),
         sa.Column("trigger_price", sa.Numeric(20, 8), nullable=True),
@@ -38,7 +39,7 @@ def upgrade() -> None:
             sa.Computed("quantity - filled_quantity", persisted=True),
             nullable=False,
         ),
-        sa.Column("status", sa.Enum(name="order_status_type", create_type=False), nullable=False, server_default="pending"),
+        sa.Column("status", PgENUM(name="order_status_type", create_type=False), nullable=False, server_default="pending"),
         sa.Column("reject_reason", sa.Text, nullable=True),
         sa.Column("retry_count", sa.SmallInteger, nullable=False, server_default="0"),
         sa.Column("max_retries", sa.SmallInteger, nullable=False, server_default="3"),

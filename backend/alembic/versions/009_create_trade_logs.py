@@ -6,6 +6,7 @@ Create Date: 2026-06-05
 """
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgENUM
 
 revision = "009"
 down_revision = "008"
@@ -22,7 +23,7 @@ def upgrade() -> None:
         sa.Column("signal_id", sa.UUID(as_uuid=True), sa.ForeignKey("signals.id", ondelete="SET NULL"), nullable=True),
         sa.Column("symbol", sa.String(20), nullable=False),
         sa.Column("coin", sa.String(10), nullable=False),
-        sa.Column("direction", sa.Enum(name="signal_direction_type", create_type=False), nullable=False),
+        sa.Column("direction", PgENUM(name="signal_direction_type", create_type=False), nullable=False),
         sa.Column("entry_price", sa.Numeric(20, 8), nullable=False),
         sa.Column("close_price", sa.Numeric(20, 8), nullable=False),
         sa.Column("quantity", sa.Numeric(20, 8), nullable=False),
@@ -38,7 +39,7 @@ def upgrade() -> None:
         ),
         sa.Column("pnl_percentage", sa.Numeric(10, 4), nullable=False),
         sa.Column("duration_seconds", sa.Integer, nullable=False),
-        sa.Column("close_reason", sa.Enum(name="close_reason_type", create_type=False), nullable=False),
+        sa.Column("close_reason", PgENUM(name="close_reason_type", create_type=False), nullable=False),
         sa.Column("is_ai_trade", sa.Boolean, nullable=False, server_default="true"),
         sa.Column("max_unrealized_pnl", sa.Numeric(20, 8), nullable=True),
         sa.Column("max_unrealized_loss", sa.Numeric(20, 8), nullable=True),

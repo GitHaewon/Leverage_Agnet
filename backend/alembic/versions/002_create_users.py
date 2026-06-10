@@ -6,6 +6,7 @@ Create Date: 2026-06-05
 """
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgENUM
 from sqlalchemy.dialects.postgresql import ARRAY, INET
 
 revision = "002"
@@ -21,8 +22,8 @@ def upgrade() -> None:
         sa.Column("email", sa.String(255), nullable=False),
         sa.Column("password_hash", sa.String(255), nullable=False),
         sa.Column("display_name", sa.String(100), nullable=True),
-        sa.Column("plan", sa.Enum(name="plan_type", create_type=False), nullable=False, server_default="free"),
-        sa.Column("risk_profile", sa.Enum(name="risk_profile_type", create_type=False), nullable=False, server_default="moderate"),
+        sa.Column("plan", PgENUM(name="plan_type", create_type=False), nullable=False, server_default="free"),
+        sa.Column("risk_profile", PgENUM(name="risk_profile_type", create_type=False), nullable=False, server_default="moderate"),
         sa.Column("timezone", sa.String(50), nullable=False, server_default="Asia/Seoul"),
         sa.Column("is_email_verified", sa.Boolean, nullable=False, server_default="false"),
         sa.Column("email_verify_token", sa.String(64), nullable=True),

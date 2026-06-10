@@ -42,13 +42,17 @@ async def _ensure_group(redis: aioredis.Redis) -> None:
             raise
 
 
-async def _process_message(fields: dict[bytes, bytes]) -> None:
+async def _process_message(fields: dict[bytes, bytes], redis: aioredis.Redis) -> None:
     """
     단일 메시지를 처리한다.
     Celery 태스크를 enqueue하고 즉시 반환한다 (비동기 처리).
     """
     symbol = fields.get(b"symbol", b"BTCUSDT").decode()
-    coin = symbol.replace("USDT", "")
+
+    # close_price 필드가 있으면 Redis에 캐시한다 (shadow_monitor_worker 가격 조회용)
+    raw_price = fields.get(b"close_price") or fields.get(b"close")
+    if raw_price is not None:
+        await redis.set(f"price:{symbol}", raw_price.decode(), ex=120)  # TTL 2분
 
     # 자동매매 활성 사용자 목록은 Celery 태스크 내부에서 조회한다
     celery_app.send_task(
@@ -79,7 +83,7 @@ async def consume() -> NoReturn:
             for _stream, entries in messages:
                 for msg_id, fields in entries:
                     try:
-                        await _process_message(fields)
+                        await _process_message(fields, redis)
                         await redis.xack(STREAM_KEY, CONSUMER_GROUP, msg_id)
                     except Exception as exc:
                         # 개별 메시지 실패는 기록 후 계속 진행
@@ -93,6 +97,28 @@ async def consume() -> NoReturn:
         except Exception as exc:
             logger.exception("consumer loop error: %s", exc)
             await asyncio.sleep(5)
+
+
+async def get_latest_prices() -> dict[str, float]:
+    """
+    Redis에 캐시된 심볼별 최신 종가를 반환한다.
+
+    _process_message()가 캔들 마감 이벤트의 close_price 필드를 `price:{symbol}` 키로
+    저장한다. shadow_monitor_worker가 이 함수로 현재가를 조회한다.
+
+    캐시 미스(가격 없음)인 심볼은 결과에서 제외된다.
+    """
+    redis = aioredis.from_url(str(settings.REDIS_URL), decode_responses=True)
+    try:
+        symbols = ["BTCUSDT", "ETHUSDT"]
+        prices: dict[str, float] = {}
+        for symbol in symbols:
+            val = await redis.get(f"price:{symbol}")
+            if val is not None:
+                prices[symbol] = float(val)
+        return prices
+    finally:
+        await redis.aclose()
 
 
 def _handle_shutdown(loop: asyncio.AbstractEventLoop) -> None:

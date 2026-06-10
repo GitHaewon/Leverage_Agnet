@@ -25,8 +25,8 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.TIMESTAMP(timezone=True), nullable=False),
         sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False, server_default=sa.text("NOW()")),
     )
-    op.create_index("idx_refresh_tokens_user", "refresh_tokens", ["user_id", "expires_at"],
-                    postgresql_where=sa.text("expires_at > NOW()"))
+    # NOW()는 partial index predicate에서 사용 불가 (STABLE, not IMMUTABLE)
+    op.create_index("idx_refresh_tokens_user", "refresh_tokens", ["user_id", "expires_at"])
     op.create_index("idx_refresh_tokens_hash", "refresh_tokens", ["token_hash"])
 
 

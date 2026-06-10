@@ -6,6 +6,7 @@ Create Date: 2026-06-05
 """
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgENUM
 from sqlalchemy.dialects.postgresql import ARRAY
 
 revision = "004"
@@ -19,7 +20,7 @@ def upgrade() -> None:
         "user_settings",
         sa.Column("id", sa.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column("user_id", sa.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True),
-        sa.Column("mode", sa.Enum(name="trading_mode_type", create_type=False), nullable=False, server_default="signal_only"),
+        sa.Column("mode", PgENUM(name="trading_mode_type", create_type=False), nullable=False, server_default="signal_only"),
         sa.Column("coins", ARRAY(sa.Text()), nullable=False, server_default="{BTC,ETH}"),
         sa.Column("risk_per_trade", sa.Numeric(5, 4), nullable=False, server_default="0.01"),
         sa.Column("max_leverage", sa.SmallInteger, nullable=False, server_default="5"),

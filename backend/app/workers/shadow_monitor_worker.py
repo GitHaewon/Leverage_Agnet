@@ -3,23 +3,21 @@ Shadow Trade 모니터 워커.
 
 30초마다 실행되어 OPEN shadow 거래를 현재가와 비교한다.
 TP 또는 SL 도달 시 PnL·Duration을 계산하고 청산 처리한다.
-
-Celery Beat 설정 예시:
-  CELERYBEAT_SCHEDULE["shadow_monitor"] = {
-      "task": "shadow_monitor",
-      "schedule": 30.0,
-  }
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Sequence
 
+from celery import Task
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.shadow_trade import ShadowTrade
+from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -91,36 +89,33 @@ async def check_and_close_shadow_trades(
     return closed
 
 
-def _make_celery_task() -> None:
-    """
-    Celery task 등록 — celery가 설치된 환경에서만 호출한다.
+@celery_app.task(
+    name="app.workers.shadow_monitor_worker.run_shadow_monitor",
+    bind=True,
+    max_retries=3,
+    acks_late=True,
+)
+def run_shadow_monitor(self: Task) -> None:
+    """Celery beat task — 30초 주기."""
+    if not settings.SHADOW_TRADING_ENABLED:
+        return
 
-    사용법:
-      from app.workers.shadow_monitor_worker import _make_celery_task
-      _make_celery_task()
-    """
-    from celery import shared_task  # celery가 없는 환경(단위 테스트)에서는 호출하지 않는다.
+    from app.core.database import AsyncSessionLocal
+    from app.workers.candle_consumer import get_latest_prices
 
-    @shared_task(name="shadow_monitor", bind=True, max_retries=3)
-    def run_shadow_monitor(self) -> None:  # type: ignore[override]
-        """Celery beat task — 30초 주기 권장."""
-        import asyncio
-        from app.core.database import AsyncSessionLocal
-        from app.workers.candle_consumer import get_latest_prices
+    async def _run() -> None:
+        prices: dict[str, Decimal] = {
+            k: Decimal(str(v))
+            for k, v in (await get_latest_prices()).items()
+        }
+        async with AsyncSessionLocal() as session:
+            closed = await check_and_close_shadow_trades(prices, session)
+            await session.commit()
+            if closed:
+                logger.info("shadow_monitor: closed %d trades this cycle", closed)
 
-        async def _run() -> None:
-            prices: dict[str, Decimal] = {
-                k: Decimal(str(v))
-                for k, v in (await get_latest_prices()).items()
-            }
-            async with AsyncSessionLocal() as session:
-                closed = await check_and_close_shadow_trades(prices, session)
-                await session.commit()
-                if closed:
-                    logger.info("shadow_monitor: closed %d trades this cycle", closed)
-
-        try:
-            asyncio.run(_run())
-        except Exception as exc:
-            logger.error("shadow_monitor failed: %s", exc, exc_info=True)
-            raise self.retry(exc=exc, countdown=10)
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        logger.error("shadow_monitor failed: %s", exc, exc_info=True)
+        raise self.retry(exc=exc, countdown=10)

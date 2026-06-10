@@ -58,7 +58,8 @@ def upgrade() -> None:
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
-
+    """)
+    op.execute("""
         CREATE TRIGGER trg_coaching_reports_updated_at
         BEFORE UPDATE ON coaching_reports
         FOR EACH ROW EXECUTE FUNCTION update_coaching_reports_updated_at();

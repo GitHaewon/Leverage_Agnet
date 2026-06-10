@@ -6,6 +6,7 @@ Create Date: 2026-06-05
 """
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgENUM
 
 revision = "003"
 down_revision = "002"
@@ -21,9 +22,9 @@ def upgrade() -> None:
         sa.Column("stripe_customer_id", sa.String(100), nullable=True, unique=True),
         sa.Column("stripe_subscription_id", sa.String(100), nullable=True, unique=True),
         sa.Column("stripe_price_id", sa.String(100), nullable=True),
-        sa.Column("plan", sa.Enum(name="plan_type", create_type=False), nullable=False, server_default="free"),
-        sa.Column("billing_period", sa.Enum(name="billing_period_type", create_type=False), nullable=True),
-        sa.Column("status", sa.Enum(name="subscription_status_type", create_type=False), nullable=False, server_default="active"),
+        sa.Column("plan", PgENUM(name="plan_type", create_type=False), nullable=False, server_default="free"),
+        sa.Column("billing_period", PgENUM(name="billing_period_type", create_type=False), nullable=True),
+        sa.Column("status", PgENUM(name="subscription_status_type", create_type=False), nullable=False, server_default="active"),
         sa.Column("trial_end_at", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.Column("current_period_start", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.Column("current_period_end", sa.TIMESTAMP(timezone=True), nullable=True),

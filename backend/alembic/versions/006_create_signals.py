@@ -6,6 +6,7 @@ Create Date: 2026-06-05
 """
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgENUM
 from sqlalchemy.dialects.postgresql import ARRAY
 
 revision = "006"
@@ -20,7 +21,7 @@ def upgrade() -> None:
         sa.Column("id", sa.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column("coin", sa.String(10), nullable=False),
         sa.Column("symbol", sa.String(20), nullable=False),
-        sa.Column("direction", sa.Enum(name="signal_direction_type", create_type=False), nullable=False),
+        sa.Column("direction", PgENUM(name="signal_direction_type", create_type=False), nullable=False),
         sa.Column("confidence", sa.Numeric(5, 4), nullable=False),
         sa.Column("entry_price", sa.Numeric(20, 8), nullable=False),
         sa.Column("take_profit", sa.Numeric(20, 8), nullable=True),
@@ -31,7 +32,7 @@ def upgrade() -> None:
         sa.Column("technical_score", sa.Numeric(5, 4), nullable=True),
         sa.Column("sentiment_score", sa.Numeric(5, 4), nullable=True),
         sa.Column("market_score", sa.Numeric(5, 4), nullable=True),
-        sa.Column("status", sa.Enum(name="signal_status_type", create_type=False), nullable=False, server_default="active"),
+        sa.Column("status", PgENUM(name="signal_status_type", create_type=False), nullable=False, server_default="active"),
         sa.Column("executed_count", sa.SmallInteger, nullable=False, server_default="0"),
         sa.Column("expires_at", sa.TIMESTAMP(timezone=True), nullable=False),
         sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False, server_default=sa.text("NOW()")),

@@ -50,7 +50,8 @@ def upgrade() -> None:
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
-
+    """)
+    op.execute("""
         CREATE TRIGGER users_login_lockout
             BEFORE UPDATE OF login_attempts ON users
             FOR EACH ROW EXECUTE FUNCTION check_login_lockout();
@@ -71,7 +72,8 @@ def upgrade() -> None:
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
-
+    """)
+    op.execute("""
         CREATE TRIGGER subscriptions_sync_user_plan
             AFTER UPDATE OF status, plan ON subscriptions
             FOR EACH ROW EXECUTE FUNCTION sync_user_plan_on_subscription_change();
@@ -89,7 +91,8 @@ def upgrade() -> None:
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
-
+    """)
+    op.execute("""
         CREATE TRIGGER exchange_accounts_auto_deactivate
             BEFORE UPDATE OF consecutive_failures ON exchange_accounts
             FOR EACH ROW EXECUTE FUNCTION auto_deactivate_on_failures();
@@ -106,7 +109,8 @@ def upgrade() -> None:
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
-
+    """)
+    op.execute("""
         CREATE TRIGGER orders_set_executed_at
             BEFORE UPDATE OF status ON orders
             FOR EACH ROW EXECUTE FUNCTION set_order_executed_at();
@@ -120,11 +124,13 @@ def upgrade() -> None:
             RAISE EXCEPTION 'audit_logs is append-only. Modification not allowed.';
         END;
         $$ LANGUAGE plpgsql;
-
+    """)
+    op.execute("""
         CREATE TRIGGER audit_logs_no_update
             BEFORE UPDATE ON audit_logs
             FOR EACH ROW EXECUTE FUNCTION prevent_audit_modification();
-
+    """)
+    op.execute("""
         CREATE TRIGGER audit_logs_no_delete
             BEFORE DELETE ON audit_logs
             FOR EACH ROW EXECUTE FUNCTION prevent_audit_modification();

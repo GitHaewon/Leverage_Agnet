@@ -14,7 +14,15 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-    op.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE")
+    # timescaledb: 프로덕션(Docker timescale 이미지)에서 사용. 로컬 plain PG는 스킵.
+    op.execute("""
+        DO $$
+        BEGIN
+            CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END $$;
+    """)
 
     op.execute("CREATE TYPE plan_type AS ENUM ('free', 'pro', 'elite')")
     op.execute("CREATE TYPE risk_profile_type AS ENUM ('conservative', 'moderate', 'aggressive')")

@@ -8,7 +8,6 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import settings
-from app.models.base import Base
 
 # Alembic Config 객체
 config = context.config
@@ -16,11 +15,13 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# ORM 모델 메타데이터 — 여기에 모든 모델을 import 해야 autogenerate가 작동
-target_metadata = Base.metadata
-
-# 모든 모델 임포트 — autogenerate가 전체 테이블을 감지하려면 필수
-import app.models  # noqa: F401  (models/__init__.py 가 모두 import)
+# ORM 메타데이터: autogenerate 시에만 필요. upgrade/current는 None으로 실행 가능.
+try:
+    from app.models.base import Base
+    import app.models  # noqa: F401
+    target_metadata = Base.metadata
+except Exception:
+    target_metadata = None
 
 
 def run_migrations_offline() -> None:

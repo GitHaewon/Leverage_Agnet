@@ -6,6 +6,7 @@ Create Date: 2026-06-05
 """
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgENUM
 
 revision = "007"
 down_revision = "006"
@@ -23,7 +24,7 @@ def upgrade() -> None:
         sa.Column("exchange_position_id", sa.String(100), nullable=True),
         sa.Column("symbol", sa.String(20), nullable=False),
         sa.Column("coin", sa.String(10), nullable=False),
-        sa.Column("direction", sa.Enum(name="signal_direction_type", create_type=False), nullable=False),
+        sa.Column("direction", PgENUM(name="signal_direction_type", create_type=False), nullable=False),
         sa.Column("entry_price", sa.Numeric(20, 8), nullable=False),
         sa.Column("quantity", sa.Numeric(20, 8), nullable=False),
         sa.Column("leverage", sa.SmallInteger, nullable=False),
@@ -33,11 +34,11 @@ def upgrade() -> None:
         sa.Column("liquidation_price", sa.Numeric(20, 8), nullable=True),
         sa.Column("trailing_stop_enabled", sa.Boolean, nullable=False, server_default="false"),
         sa.Column("trailing_stop_callback", sa.Numeric(5, 2), nullable=True),
-        sa.Column("status", sa.Enum(name="position_status_type", create_type=False), nullable=False, server_default="open"),
+        sa.Column("status", PgENUM(name="position_status_type", create_type=False), nullable=False, server_default="open"),
         sa.Column("close_price", sa.Numeric(20, 8), nullable=True),
         sa.Column("realized_pnl", sa.Numeric(20, 8), nullable=True),
         sa.Column("fee_paid", sa.Numeric(20, 8), nullable=False, server_default="0"),
-        sa.Column("close_reason", sa.Enum(name="close_reason_type", create_type=False), nullable=True),
+        sa.Column("close_reason", PgENUM(name="close_reason_type", create_type=False), nullable=True),
         sa.Column("is_ai_trade", sa.Boolean, nullable=False, server_default="true"),
         sa.Column("notes", sa.Text, nullable=True),
         sa.Column("opened_at", sa.TIMESTAMP(timezone=True), nullable=False, server_default=sa.text("NOW()")),

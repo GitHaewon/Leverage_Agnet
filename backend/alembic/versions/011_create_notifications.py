@@ -6,6 +6,7 @@ Create Date: 2026-06-05
 """
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgENUM
 from sqlalchemy.dialects.postgresql import JSONB
 
 revision = "011"
@@ -19,8 +20,8 @@ def upgrade() -> None:
         "notifications",
         sa.Column("id", sa.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column("user_id", sa.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("type", sa.Enum(name="notification_type_enum", create_type=False), nullable=False),
-        sa.Column("channel", sa.Enum(name="notification_channel_type", create_type=False), nullable=False),
+        sa.Column("type", PgENUM(name="notification_type_enum", create_type=False), nullable=False),
+        sa.Column("channel", PgENUM(name="notification_channel_type", create_type=False), nullable=False),
         sa.Column("title", sa.String(200), nullable=False),
         sa.Column("body", sa.Text, nullable=False),
         sa.Column("metadata", JSONB, nullable=False, server_default="{}"),
@@ -34,8 +35,10 @@ def upgrade() -> None:
         sa.CheckConstraint("retry_count >= 0", name="notifications_retry_non_negative"),
         sa.CheckConstraint("sent_at IS NULL OR sent_at >= created_at", name="notifications_sent_at_after_created"),
     )
+    # NOW()는 STABLE 함수라 partial index predicate에서 사용 불가 (PostgreSQL 제약)
+    # 로컬 plain PG: is_sent 조건만 유지. TimescaleDB Docker 이미지에서는 원래 조건 사용.
     op.create_index("idx_notifications_pending", "notifications", ["created_at"],
-                    postgresql_where=sa.text("is_sent = FALSE AND (next_retry_at IS NULL OR next_retry_at <= NOW())"))
+                    postgresql_where=sa.text("is_sent = FALSE"))
     op.create_index("idx_notifications_retry", "notifications", ["next_retry_at"],
                     postgresql_where=sa.text("is_sent = FALSE AND retry_count > 0 AND retry_count < 3"))
     op.create_index("idx_notifications_user_created", "notifications", ["user_id", "created_at"],

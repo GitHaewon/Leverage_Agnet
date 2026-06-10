@@ -31,11 +31,16 @@ def upgrade() -> None:
         sa.CheckConstraint("volume >= 0", name="ohlcv_volume_non_negative"),
     )
 
-    # TimescaleDB 하이퍼테이블 변환 (7일 청크)
-    op.execute(
-        "SELECT create_hypertable('ohlcv', 'time', "
-        "chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE)"
-    )
+    # TimescaleDB 하이퍼테이블 변환 — plain PG에서는 스킵
+    op.execute("""
+        DO $$
+        BEGIN
+            PERFORM create_hypertable('ohlcv', 'time',
+                chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END $$;
+    """)
 
     # 복합 unique 인덱스
     op.create_index(
