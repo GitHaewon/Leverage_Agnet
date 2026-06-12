@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from agents.decision.models import FinalAction, FinalDecision, StrategyType, TradeCandidate
 from agents.execution.models import ExecutionRequest, FilledOrder, OrderTicket
 from agents.risk.models import (
     AccountState,
@@ -81,6 +82,90 @@ def make_request(**kwargs: Any) -> ExecutionRequest:
     )
     defaults.update(kwargs)
     return ExecutionRequest(**defaults)
+
+
+def make_trade_candidate(**kwargs: Any) -> TradeCandidate:
+    action = kwargs.pop("action", FinalAction.LONG)
+    strategy_type = kwargs.pop("strategy_type", StrategyType.INTRADAY)
+    actual_rr = kwargs.pop("actual_rr", 1.6)
+    min_required_rr = kwargs.pop("min_required_rr", 1.5)
+
+    is_long = action == FinalAction.LONG
+    entry = Decimal("100")
+    stop_loss = Decimal("95") if is_long else Decimal("105")
+    take_profit = (
+        entry + (entry - stop_loss) * Decimal(str(actual_rr))
+        if is_long
+        else entry - (stop_loss - entry) * Decimal(str(actual_rr))
+    )
+
+    defaults: dict[str, Any] = dict(
+        action=action,
+        coin="BTC",
+        symbol="BTCUSDT",
+        strategy_type=strategy_type,
+        expected_holding_minutes=30,
+        entry_price=entry,
+        stop_loss=stop_loss,
+        take_profit=take_profit.quantize(Decimal("0.01")),
+        leverage=5,
+        margin_ratio=0.02,
+        notional_size=Decimal("1000"),
+        actual_rr=actual_rr,
+        min_required_rr=min_required_rr,
+        expected_gross_profit=Decimal("80"),
+        expected_gross_loss=Decimal("50"),
+        expected_fees=Decimal("1"),
+        expected_slippage_cost=Decimal("0.60"),
+        expected_net_profit=Decimal("78.40"),
+        expected_net_loss=Decimal("51.60"),
+        liquidation_price=Decimal("80") if is_long else Decimal("120"),
+        spread_bps=1.0,
+        slippage_bps=1.0,
+        reasons=[],
+    )
+    defaults.update(kwargs)
+    return TradeCandidate(**defaults)
+
+
+def make_final_decision(
+    candidate: TradeCandidate,
+    action: FinalAction | None = None,
+) -> FinalDecision:
+    return FinalDecision(
+        action=action or candidate.action,
+        reason="approved final decision",
+        candidate=candidate,
+        ai_review=None,
+        risk_result=None,
+    )
+
+
+def make_candidate_request(
+    candidate: TradeCandidate | None = None,
+    validation: ValidationResult | None = None,
+    final_decision: FinalDecision | None = None,
+    **kwargs: Any,
+) -> ExecutionRequest:
+    cand = candidate or make_trade_candidate()
+    val = validation or make_approved_validation(rr_ratio=Decimal(str(cand.actual_rr)))
+    signal = make_signal(
+        direction=cand.action.value,
+        coin=cand.coin,
+        symbol=cand.symbol,
+        entry_price=cand.entry_price,
+        take_profit=cand.take_profit,
+        stop_loss=cand.stop_loss,
+        leverage=cand.leverage,
+    )
+    defaults: dict[str, Any] = dict(
+        signal=signal,
+        candidate=cand,
+        final_decision=final_decision if final_decision is not None else make_final_decision(cand),
+        approved_validation=val,
+    )
+    defaults.update(kwargs)
+    return make_request(**defaults)
 
 
 # ── ValidationResult 헬퍼 ─────────────────────────────────────────────────────────

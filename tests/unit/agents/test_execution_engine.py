@@ -46,14 +46,18 @@ import pytest
 
 from agents.execution.engine import ExecutionEngine
 from agents.execution.gateway import PaperGateway
+from agents.decision.models import FinalAction, StrategyType
 
 from tests.unit.agents._execution_fixtures import (
     MockGateway,
     StubRiskValidator,
+    make_candidate_request,
     make_approved_validation,
+    make_final_decision,
     make_rejected_validation,
     make_request,
     make_signal,
+    make_trade_candidate,
 )
 
 
@@ -366,3 +370,157 @@ def test_validator_called_exactly_once():
     )
     _run(engine.execute(make_request()))
     assert stub.call_count == 1
+
+
+# ── Deterministic TradeCandidate / FinalDecision alignment ───────────────────
+
+def test_scalping_rr_1_3_approved_candidate_reaches_execution_path():
+    candidate = make_trade_candidate(
+        strategy_type=StrategyType.SCALPING,
+        actual_rr=1.3,
+        min_required_rr=1.2,
+        expected_holding_minutes=5,
+    )
+    stub = StubRiskValidator(make_rejected_validation("ORDER_004", "legacy R:R 2.0 fail"))
+    gw = MockGateway()
+    engine = ExecutionEngine(stub, gw, live_trading_enabled=True, mode="testnet")
+
+    result = _run(engine.execute(make_candidate_request(candidate)))
+
+    assert result.approved is True
+    assert result.executed is True
+    assert len(gw.recorded_orders) == 3
+    assert stub.call_count == 0
+
+
+def test_intraday_rr_1_6_approved_candidate_reaches_execution_path():
+    candidate = make_trade_candidate(
+        strategy_type=StrategyType.INTRADAY,
+        actual_rr=1.6,
+        min_required_rr=1.5,
+        expected_holding_minutes=30,
+    )
+    stub = StubRiskValidator(make_rejected_validation("ORDER_004", "legacy R:R 2.0 fail"))
+    gw = MockGateway()
+    engine = ExecutionEngine(stub, gw, live_trading_enabled=True, mode="testnet")
+
+    result = _run(engine.execute(make_candidate_request(candidate)))
+
+    assert result.approved is True
+    assert result.executed is True
+    assert len(gw.recorded_orders) == 3
+    assert stub.call_count == 0
+
+
+def test_trend_following_rr_2_0_approved_candidate_reaches_execution_path():
+    candidate = make_trade_candidate(
+        strategy_type=StrategyType.TREND_FOLLOWING,
+        actual_rr=2.0,
+        min_required_rr=2.0,
+        expected_holding_minutes=120,
+    )
+    gw = MockGateway()
+    engine = _engine_live(
+        make_rejected_validation("ORDER_004", "legacy should not run"),
+        gateway=gw,
+    )
+
+    result = _run(engine.execute(make_candidate_request(candidate)))
+
+    assert result.approved is True
+    assert result.executed is True
+    assert len(gw.recorded_orders) == 3
+
+
+def test_candidate_rejected_by_risk_never_reaches_execution():
+    candidate = make_trade_candidate()
+    validation = make_rejected_validation("ORDER_001", "risk rejected")
+    gw = MockGateway()
+    engine = _engine_live(make_approved_validation(), gateway=gw)
+
+    result = _run(engine.execute(make_candidate_request(candidate, validation=validation)))
+
+    assert result.approved is False
+    assert result.executed is False
+    assert result.rejection_code == "ORDER_001"
+    assert len(gw.recorded_orders) == 0
+
+
+def test_final_decision_hold_never_reaches_execution():
+    candidate = make_trade_candidate()
+    final_decision = make_final_decision(candidate, action=FinalAction.HOLD)
+    gw = MockGateway()
+    engine = _engine_live(make_approved_validation(), gateway=gw)
+
+    result = _run(engine.execute(make_candidate_request(
+        candidate,
+        final_decision=final_decision,
+    )))
+
+    assert result.approved is False
+    assert result.executed is False
+    assert result.rejection_code == "FINAL_DECISION_HOLD"
+    assert len(gw.recorded_orders) == 0
+
+
+def test_missing_stop_loss_rejected_inside_execution():
+    candidate = make_trade_candidate(stop_loss=None)
+    gw = MockGateway()
+    engine = _engine_live(make_approved_validation(), gateway=gw)
+
+    result = _run(engine.execute(make_candidate_request(candidate)))
+
+    assert result.approved is False
+    assert result.rejection_code == "ORDER_003"
+    assert len(gw.recorded_orders) == 0
+
+
+def test_missing_take_profit_rejected_inside_execution():
+    candidate = make_trade_candidate(take_profit=None)
+    gw = MockGateway()
+    engine = _engine_live(make_approved_validation(), gateway=gw)
+
+    result = _run(engine.execute(make_candidate_request(candidate)))
+
+    assert result.approved is False
+    assert result.rejection_code == "TAKE_PROFIT_MISSING"
+    assert len(gw.recorded_orders) == 0
+
+
+def test_candidate_tp_sl_failure_still_triggers_emergency_close():
+    candidate = make_trade_candidate(
+        strategy_type=StrategyType.SCALPING,
+        actual_rr=1.3,
+        min_required_rr=1.2,
+        expected_holding_minutes=5,
+    )
+    gw = MockGateway(fail_on_purpose="take_profit")
+    engine = _engine_live(make_approved_validation(), gateway=gw)
+
+    result = _run(engine.execute(make_candidate_request(candidate)))
+
+    assert result.executed is True
+    assert result.tp_sl_failed is True
+    assert result.emergency_close_order is not None
+    assert gw.recorded_orders[-1].purpose == "emergency_close"
+
+
+def test_candidate_paper_mode_places_no_real_orders():
+    candidate = make_trade_candidate(
+        strategy_type=StrategyType.INTRADAY,
+        actual_rr=1.6,
+        min_required_rr=1.5,
+    )
+    gw = MockGateway()
+    engine = ExecutionEngine(
+        risk_validator=StubRiskValidator(make_rejected_validation()),
+        gateway=gw,
+        live_trading_enabled=False,
+    )
+
+    result = _run(engine.execute(make_candidate_request(candidate)))
+
+    assert result.approved is True
+    assert result.executed is False
+    assert result.mode == "paper"
+    assert len(gw.recorded_orders) == 0

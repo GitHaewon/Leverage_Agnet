@@ -531,6 +531,9 @@ class OrchestratorPipeline:
             consecutive_losses=inp.consecutive_losses,
             open_positions_count=len(inp.open_positions),
             same_coin_position=same_coin,
+            candidate=candidate,
+            final_decision=ctx.final_decision,
+            approved_validation=ctx.risk_result,
         )
         r10 = await _run_step(
             "execution",

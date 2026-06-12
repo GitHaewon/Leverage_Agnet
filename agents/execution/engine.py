@@ -1,5 +1,5 @@
 """
-ExecutionEngine — Signal → Risk Validation → Position Sizing → Order Execution.
+ExecutionEngine — Approved Decision → Order Execution.
 
 핵심 규칙:
   1. Risk Engine 승인 없이는 주문 절대 금지 (AGENTS.md §7, CLAUDE.md 절대 규칙)
@@ -10,7 +10,8 @@ ExecutionEngine — Signal → Risk Validation → Position Sizing → Order Exe
 
 파이프라인:
   Signal
-    → RiskValidatorProtocol.validate()   (HOLD / SL / R:R / 손실 한도 / 사이징 등)
+    → approved_validation from RiskEngine.validate_candidate()
+      or legacy RiskValidatorProtocol.validate()
     → LIVE_TRADING_ENABLED gate          (paper 모드 → 여기서 종료)
     → SafetyGateProtocol.check_order_allowed()  (live 전용 최종 안전 게이트)
     → gateway.place_order(entry)
@@ -20,7 +21,7 @@ ExecutionEngine — Signal → Risk Validation → Position Sizing → Order Exe
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from agents.execution.models import (
     ExecutionRequest,
@@ -43,11 +44,23 @@ _CLOSE_SIDE: dict[str, str] = {"LONG": "SELL", "SHORT": "BUY"}
 
 # ── 티켓 빌더 ────────────────────────────────────────────────────────────────────
 
-def build_entry_ticket(signal: RawSignal, validation: ValidationResult) -> OrderTicket:
+def _direction(signal: Any) -> str:
+    if hasattr(signal, "direction"):
+        return str(signal.direction)
+    action = getattr(signal, "action", "")
+    return str(getattr(action, "value", action))
+
+
+def _action_value(obj: Any) -> str:
+    action = getattr(obj, "action", obj)
+    return str(getattr(action, "value", action))
+
+
+def build_entry_ticket(signal: Any, validation: ValidationResult) -> OrderTicket:
     """시장가 진입 주문 — reduce_only=False."""
     return OrderTicket(
         symbol=signal.symbol,
-        side=_ENTRY_SIDE[signal.direction],
+        side=_ENTRY_SIDE[_direction(signal)],
         order_type="MARKET",
         quantity=validation.quantity,   # type: ignore[arg-type]
         price=signal.entry_price,
@@ -56,14 +69,14 @@ def build_entry_ticket(signal: RawSignal, validation: ValidationResult) -> Order
     )
 
 
-def build_tp_ticket(signal: RawSignal, validation: ValidationResult) -> OrderTicket:
+def build_tp_ticket(signal: Any, validation: ValidationResult) -> OrderTicket:
     """
     TP(Take Profit) 주문 — reduce_only=True.
     LONG: SELL / SHORT: BUY
     """
     return OrderTicket(
         symbol=signal.symbol,
-        side=_CLOSE_SIDE[signal.direction],
+        side=_CLOSE_SIDE[_direction(signal)],
         order_type="TAKE_PROFIT_MARKET",
         quantity=validation.quantity,   # type: ignore[arg-type]
         price=signal.take_profit,       # type: ignore[arg-type]
@@ -72,14 +85,14 @@ def build_tp_ticket(signal: RawSignal, validation: ValidationResult) -> OrderTic
     )
 
 
-def build_sl_ticket(signal: RawSignal, validation: ValidationResult) -> OrderTicket:
+def build_sl_ticket(signal: Any, validation: ValidationResult) -> OrderTicket:
     """
     SL(Stop Loss) 주문 — reduce_only=True.
     LONG: SELL / SHORT: BUY
     """
     return OrderTicket(
         symbol=signal.symbol,
-        side=_CLOSE_SIDE[signal.direction],
+        side=_CLOSE_SIDE[_direction(signal)],
         order_type="STOP_MARKET",
         quantity=validation.quantity,   # type: ignore[arg-type]
         price=signal.stop_loss,         # type: ignore[arg-type]
@@ -88,22 +101,60 @@ def build_sl_ticket(signal: RawSignal, validation: ValidationResult) -> OrderTic
     )
 
 
-def build_emergency_close_ticket(signal: RawSignal, quantity: "Decimal") -> OrderTicket:
+def build_emergency_close_ticket(signal: Any, quantity: "Decimal") -> OrderTicket:
     """
     긴급 청산 주문 — 시장가, reduce_only=True.
 
     TP/SL 재시도까지 실패 시 미보호 포지션을 즉시 청산하기 위해 사용한다.
     """
-    from decimal import Decimal as _Decimal
     return OrderTicket(
         symbol=signal.symbol,
-        side=_CLOSE_SIDE[signal.direction],
+        side=_CLOSE_SIDE[_direction(signal)],
         order_type="MARKET",
         quantity=quantity,
         price=signal.entry_price,   # 참조가 (시장가 주문이므로 실제 체결가와 다를 수 있음)
         reduce_only=True,
         purpose="emergency_close",
     )
+
+
+def _local_execution_safety(
+    req: ExecutionRequest,
+    validation: ValidationResult,
+    signal: Any,
+) -> tuple[bool, str | None, str | None]:
+    """
+    Final pre-order checks. These do not replace RiskEngine; they prevent
+    malformed approved requests from reaching a gateway.
+    """
+    if not validation.approved:
+        return False, validation.rejection_code, validation.rejection_reason
+
+    if req.approved_validation is not None:
+        if req.final_decision is None:
+            return False, "FINAL_DECISION_MISSING", "FinalDecision is required"
+        if req.candidate is None:
+            return False, "CANDIDATE_MISSING", "TradeCandidate is required"
+
+    if req.final_decision is not None:
+        final_action = _action_value(req.final_decision)
+        if final_action not in ("LONG", "SHORT"):
+            return False, "FINAL_DECISION_HOLD", "FinalDecision is not LONG/SHORT"
+
+    if _direction(signal) not in ("LONG", "SHORT"):
+        return False, "INVALID_DIRECTION", "Execution direction must be LONG or SHORT"
+
+    if getattr(signal, "stop_loss", None) is None:
+        return False, "ORDER_003", "stop_loss is required before execution"
+    if getattr(signal, "take_profit", None) is None:
+        return False, "TAKE_PROFIT_MISSING", "take_profit is required before execution"
+
+    if validation.quantity is None or validation.quantity <= 0:
+        return False, "SIZING", "approved validation has no positive quantity"
+    if validation.final_leverage is None or validation.final_leverage <= 0:
+        return False, "LEVERAGE", "approved validation has no final leverage"
+
+    return True, None, None
 
 
 # ── 실행 엔진 ─────────────────────────────────────────────────────────────────────
@@ -155,18 +206,26 @@ class ExecutionEngine:
           approved=True, executed=True  → 주문 체결 완료
         """
         try:
-            # ── STEP 1: Risk Validation ─────────────────────────────────────
-            validation = await self._validator.validate(
-                signal=req.signal,
-                ctx=req.user_ctx,
-                account=req.account,
-                daily_loss_usdt=req.daily_loss_usdt,
-                weekly_loss_usdt=req.weekly_loss_usdt,
-                weekly_limit_usdt=req.weekly_limit_usdt,
-                consecutive_losses=req.consecutive_losses,
-                open_positions_count=req.open_positions_count,
-                same_coin_position=req.same_coin_position,
-            )
+            # ── STEP 1: Approved Risk Validation 확인 ─────────────────────
+            # New deterministic flow: RiskEngine.validate_candidate() already
+            # approved the TradeCandidate before FinalDecision reached execution.
+            # Legacy flow: no approved_validation supplied → call validate().
+            if req.approved_validation is not None:
+                validation = req.approved_validation
+                signal_for_orders = req.candidate or req.signal
+            else:
+                validation = await self._validator.validate(
+                    signal=req.signal,
+                    ctx=req.user_ctx,
+                    account=req.account,
+                    daily_loss_usdt=req.daily_loss_usdt,
+                    weekly_loss_usdt=req.weekly_loss_usdt,
+                    weekly_limit_usdt=req.weekly_limit_usdt,
+                    consecutive_losses=req.consecutive_losses,
+                    open_positions_count=req.open_positions_count,
+                    same_coin_position=req.same_coin_position,
+                )
+                signal_for_orders = req.signal
 
             if not validation.approved:
                 logger.info(
@@ -184,6 +243,27 @@ class ExecutionEngine:
                     validation=validation,
                 )
 
+            safe, code, reason = _local_execution_safety(
+                req,
+                validation,
+                signal_for_orders,
+            )
+            if not safe:
+                logger.warning(
+                    "Execution local safety rejected user_id=%s code=%s reason=%s",
+                    req.user_ctx.user_id,
+                    code,
+                    reason,
+                )
+                return ExecutionResult(
+                    approved=False,
+                    executed=False,
+                    mode=self._mode,
+                    rejection_code=code,
+                    rejection_reason=reason,
+                    validation=validation,
+                )
+
             # ── STEP 2: LIVE_TRADING gate ────────────────────────────────────
             # LIVE_TRADING_ENABLED=false → 검증은 통과했지만 실제 주문 없음
             if not self._live:
@@ -191,7 +271,7 @@ class ExecutionEngine:
                     "Execution approved but LIVE_TRADING_ENABLED=false "
                     "user_id=%s signal=%s/%s qty=%s lev=%dx",
                     req.user_ctx.user_id,
-                    req.signal.coin, req.signal.direction,
+                    signal_for_orders.coin, _direction(signal_for_orders),
                     validation.quantity, validation.final_leverage,
                 )
                 return ExecutionResult(
@@ -225,7 +305,7 @@ class ExecutionEngine:
                     )
 
             # ── STEP 3: 주문 실행 (entry → TP → SL) ──────────────────────────
-            entry_ticket = build_entry_ticket(req.signal, validation)
+            entry_ticket = build_entry_ticket(signal_for_orders, validation)
             entry_filled: FilledOrder = await self._gateway.place_order(entry_ticket)
 
             tp_filled: FilledOrder | None = None
@@ -234,10 +314,10 @@ class ExecutionEngine:
 
             try:
                 tp_filled = await self._gateway.place_order(
-                    build_tp_ticket(req.signal, validation)
+                    build_tp_ticket(signal_for_orders, validation)
                 )
                 sl_filled = await self._gateway.place_order(
-                    build_sl_ticket(req.signal, validation)
+                    build_sl_ticket(signal_for_orders, validation)
                 )
             except Exception as tp_sl_exc:
                 logger.error(
@@ -259,11 +339,11 @@ class ExecutionEngine:
                 try:
                     if tp_filled is None:
                         tp_filled = await self._gateway.place_order(
-                            build_tp_ticket(req.signal, validation)
+                            build_tp_ticket(signal_for_orders, validation)
                         )
                     if sl_filled is None:
                         sl_filled = await self._gateway.place_order(
-                            build_sl_ticket(req.signal, validation)
+                            build_sl_ticket(signal_for_orders, validation)
                         )
                     tp_sl_failed = False
                     logger.info(
@@ -284,7 +364,7 @@ class ExecutionEngine:
                     emergency_failed = False
                     try:
                         close_ticket = build_emergency_close_ticket(
-                            req.signal, entry_filled.quantity
+                            signal_for_orders, entry_filled.quantity
                         )
                         emergency_order = await self._gateway.place_order(close_ticket)
                         logger.warning(

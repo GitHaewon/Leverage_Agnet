@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from agents.risk.models import (
@@ -70,6 +70,12 @@ class ExecutionRequest:
     consecutive_losses: int
     open_positions_count: int
     same_coin_position: OpenPosition | None
+
+    # New deterministic flow proof. When present, ExecutionEngine must use this
+    # approved RiskEngine result instead of re-running legacy RawSignal validate().
+    candidate: Any = None
+    final_decision: Any = None
+    approved_validation: ValidationResult | None = None
 
 
 @dataclass
