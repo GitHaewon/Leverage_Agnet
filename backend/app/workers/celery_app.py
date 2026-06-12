@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import task_failure, task_postrun, task_prerun, task_retry
 
 from app.core.config import settings
@@ -14,6 +15,7 @@ celery_app = Celery(
     include=[
         "app.workers.analysis_worker",
         "app.workers.shadow_monitor_worker",
+        "app.workers.market_data_worker",
         "app.workers.notification_worker",
         "app.workers.reflection_worker",
         "app.workers.coaching_worker",
@@ -27,17 +29,22 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_track_started=True,
+    broker_connection_retry_on_startup=True,
     task_acks_late=True,           # 태스크 실패 시 재큐
     worker_prefetch_multiplier=1,  # 주문 실행 공정성
     beat_schedule={
-        "analyze-btc-eth-every-5min": {
+        "fetch-market-data-every-1min": {
+            "task": "app.workers.market_data_worker.fetch_market_data",
+            "schedule": 60.0,
+        },
+        "analyze-btc-eth-every-15min": {
             "task": "app.workers.analysis_worker.run_analysis_cycle",
-            "schedule": 300.0,     # 5분 (초 단위)
+            "schedule": 900.0,     # 15분 (shadow trading 테스트용)
             "args": (["BTCUSDT", "ETHUSDT"],),
         },
         "daily-summary-22-kst": {
             "task": "app.workers.notification_worker.send_daily_summary",
-            "schedule": {"hour": 13, "minute": 0},   # UTC 13:00 = KST 22:00
+            "schedule": crontab(hour=13, minute=0),   # UTC 13:00 = KST 22:00
         },
         "signal-expiry-check-every-min": {
             "task": "app.workers.analysis_worker.expire_signals",
@@ -49,7 +56,7 @@ celery_app.conf.update(
         },
         "weekly-coaching-report-mon-09-kst": {
             "task": "app.workers.coaching_worker.run_weekly_coaching_all_users",
-            "schedule": {"day_of_week": "mon", "hour": 0, "minute": 0},  # UTC Mon 00:00 = KST 09:00
+            "schedule": crontab(day_of_week="mon", hour=0, minute=0),  # UTC Mon 00:00 = KST 09:00
         },
     },
 )

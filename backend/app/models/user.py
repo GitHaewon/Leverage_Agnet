@@ -130,6 +130,7 @@ class User(Base, PrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
         back_populates="user", cascade="all, delete-orphan"
     )
     audit_logs: Mapped[list["AuditLog"]] = relationship(back_populates="user")
+    trade_journals: Mapped[list["TradeJournal"]] = relationship(back_populates="user")
 
     def __repr__(self) -> str:
         return f"<User id={self.id} email={self.email} plan={self.plan}>"

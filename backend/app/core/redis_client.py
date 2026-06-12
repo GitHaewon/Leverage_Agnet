@@ -21,7 +21,7 @@ async def connect_redis() -> None:
         max_connections=settings.REDIS_MAX_CONNECTIONS,
     )
     await _redis.ping()
-    logger.info("Redis connected", url=_safe_url(str(settings.REDIS_URL)))
+    logger.info("Redis connected: %s", _safe_url(str(settings.REDIS_URL)))
 
 
 async def disconnect_redis() -> None:

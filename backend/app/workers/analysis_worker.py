@@ -133,7 +133,11 @@ def run_analysis_cycle(self: Task, symbols: list[str]) -> dict[str, Any]:
     beat_schedule에서 5분마다 트리거된다.
     개별 사용자 파이프라인 실패는 다른 사용자에게 영향을 주지 않는다.
     """
-    return asyncio.run(_run_cycle_async(symbols))
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_run_cycle_async(symbols))
+    finally:
+        loop.close()
 
 
 async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
@@ -179,12 +183,20 @@ async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
                     if settings.LIVE_TRADING_ENABLED:
                         result = await live_pipeline.run(inp)  # type: ignore[union-attr]
                     elif settings.SHADOW_TRADING_ENABLED:
-                        # 심볼별 독립 세션: 한 심볼 실패가 다른 심볼 저장에 영향 없음
-                        from app.core.database import AsyncSessionLocal
-                        async with AsyncSessionLocal() as session:
-                            shadow_deps = await _build_deps(redis_client, session=session)
-                            result = await OrchestratorPipeline(shadow_deps).run(inp)
-                            await session.commit()
+                        # NullPool 엔진으로 새 세션 생성 — asyncio.run() event loop 경계 문제 방지
+                        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+                        from sqlalchemy.pool import NullPool
+                        _engine = create_async_engine(settings.async_database_url, poolclass=NullPool)
+                        try:
+                            _sf = async_sessionmaker(
+                                _engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
+                            )
+                            async with _sf() as session:
+                                shadow_deps = await _build_deps(redis_client, session=session)
+                                result = await OrchestratorPipeline(shadow_deps).run(inp)
+                                await session.commit()
+                        finally:
+                            await _engine.dispose()
                     else:
                         result = await shared_pipeline.run(inp)  # type: ignore[union-attr]
                     results[f"{user.id}:{coin}"] = {
@@ -221,7 +233,11 @@ def run_signal_for_user(
     """
     수동 시그널 요청 — API 엔드포인트에서 특정 사용자·코인에 대해 즉시 호출.
     """
-    return asyncio.run(_run_single_async(user_id, coin, user_ctx))
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_run_single_async(user_id, coin, user_ctx))
+    finally:
+        loop.close()
 
 
 async def _run_single_async(
@@ -286,7 +302,11 @@ async def _run_single_async(
 )
 def expire_signals() -> None:
     """만료된 시그널 정리 — beat_schedule에서 1분마다 실행."""
-    asyncio.run(_expire_signals_async())
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_expire_signals_async())
+    finally:
+        loop.close()
 
 
 async def _expire_signals_async() -> None:

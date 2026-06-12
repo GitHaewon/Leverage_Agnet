@@ -10,6 +10,7 @@ import json
 import logging
 from typing import Any
 
+import pandas as pd
 import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
@@ -29,14 +30,18 @@ class MarketDataAgent:
 
         price_raw: str | None = await self._redis.get(f"price:{coin}")
 
-        ohlcv: dict[str, Any] = {}
+        ohlcv: dict[str, pd.DataFrame] = {}
         for interval in _OHLCV_INTERVALS:
             raw = await self._redis.get(f"kline:{symbol}:{interval}:latest")
             if raw:
                 try:
-                    ohlcv[interval] = json.loads(raw)
-                except json.JSONDecodeError:
-                    logger.warning("bad kline JSON: symbol=%s interval=%s", symbol, interval)
+                    records = json.loads(raw)
+                    if isinstance(records, list) and len(records) >= 30:
+                        df = pd.DataFrame(records)
+                        if {"open", "high", "low", "close", "volume"}.issubset(df.columns):
+                            ohlcv[interval] = df[["open", "high", "low", "close", "volume"]].copy()
+                except Exception:
+                    logger.warning("bad kline data: symbol=%s interval=%s", symbol, interval)
 
         funding_raw: str | None = await self._redis.get(f"funding:{symbol}")
         funding = json.loads(funding_raw) if funding_raw else None
@@ -48,6 +53,7 @@ class MarketDataAgent:
             "coin": coin,
             "symbol": symbol,
             "price": price_raw,
+            "current_price": price_raw,   # pipeline이 current_price 키로 참조
             "ohlcv": ohlcv,
             "funding": funding,
             "open_interest": oi,

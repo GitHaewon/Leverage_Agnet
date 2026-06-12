@@ -9,6 +9,7 @@ import {
   ShieldAlert,
   LogOut,
   Zap,
+  FlaskConical,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useAuthStore } from "@/store/auth"
@@ -16,6 +17,7 @@ import { api } from "@/lib/api"
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "대시보드", icon: LayoutDashboard },
+  { href: "/shadow-trades", label: "Shadow Trading", icon: FlaskConical },
   { href: "/positions", label: "포지션", icon: TrendingUp },
   { href: "/trades", label: "거래 내역", icon: History },
   { href: "/risk", label: "리스크", icon: ShieldAlert },

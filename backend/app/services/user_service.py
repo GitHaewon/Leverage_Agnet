@@ -20,7 +20,7 @@ import logging
 from sqlalchemy import select, update as sa_update
 from sqlalchemy.orm import selectinload
 
-from app.core.database import AsyncSessionLocal
+from app.core.database import AsyncSessionLocal, celery_session
 from app.models.enums import TradingModeType
 from app.models.user import User
 from app.models.user_settings import UserSettings
@@ -105,7 +105,7 @@ async def disable_auto_trading(user_id: str, reason: str = "") -> None:
 
 async def get_auto_trading_users() -> list[UserTradingContext]:
     """Return users where trading is active and mode is full_auto or semi_auto."""
-    async with AsyncSessionLocal() as db:
+    async with celery_session() as db:
         stmt = (
             select(User)
             .join(UserSettings, User.id == UserSettings.user_id)
@@ -126,7 +126,7 @@ async def get_auto_trading_users() -> list[UserTradingContext]:
 async def get_user_context(user_id: str) -> UserTradingContext:
     """Return trading context for a single user. Raises ValueError if not found."""
     uid = uuid.UUID(user_id)
-    async with AsyncSessionLocal() as db:
+    async with celery_session() as db:
         stmt = (
             select(User)
             .where(User.id == uid)

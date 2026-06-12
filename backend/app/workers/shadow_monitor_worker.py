@@ -104,18 +104,33 @@ def run_shadow_monitor(self: Task) -> None:
     from app.workers.candle_consumer import get_latest_prices
 
     async def _run() -> None:
-        prices: dict[str, Decimal] = {
-            k: Decimal(str(v))
-            for k, v in (await get_latest_prices()).items()
-        }
-        async with AsyncSessionLocal() as session:
-            closed = await check_and_close_shadow_trades(prices, session)
-            await session.commit()
-            if closed:
-                logger.info("shadow_monitor: closed %d trades this cycle", closed)
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        # Celery 태스크마다 새 event loop에서 실행되므로 NullPool로 풀 재사용 방지
+        _engine = create_async_engine(settings.async_database_url, poolclass=NullPool)
+        _session_factory = async_sessionmaker(
+            _engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
+        )
+        try:
+            prices: dict[str, Decimal] = {
+                k: Decimal(str(v))
+                for k, v in (await get_latest_prices()).items()
+            }
+            async with _session_factory() as session:
+                closed = await check_and_close_shadow_trades(prices, session)
+                await session.commit()
+                if closed:
+                    logger.info("shadow_monitor: closed %d trades this cycle", closed)
+        finally:
+            await _engine.dispose()
 
     try:
-        asyncio.run(_run())
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_run())
+        finally:
+            loop.close()
     except Exception as exc:
         logger.error("shadow_monitor failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)

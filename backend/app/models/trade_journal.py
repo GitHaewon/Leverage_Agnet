@@ -99,9 +99,9 @@ class TradeJournal(Base, PrimaryKeyMixin, TimestampMixin):
 
     # ── 관계 ─────────────────────────────────────────────────────────────────────
     user: Mapped["User"] = relationship(back_populates="trade_journals")
-    position: Mapped["Position"] = relationship(back_populates="trade_journal")
-    signal: Mapped["Signal | None"] = relationship(back_populates="trade_journals")
-    trade_log: Mapped["TradeLog"] = relationship(back_populates="trade_journal")
+    position: Mapped["Position"] = relationship()
+    signal: Mapped["Signal | None"] = relationship()
+    trade_log: Mapped["TradeLog"] = relationship()
 
     @property
     def is_win(self) -> bool:

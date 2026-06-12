@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, binance, health, journals, metrics_endpoint, risk, signals, sizing, trading
+from app.api.v1 import auth, binance, health, journals, metrics_endpoint, risk, shadow_trades, signals, sizing, trading
 
 router = APIRouter()
 
@@ -12,6 +12,7 @@ router.include_router(sizing.router)            # prefix="/sizing"
 router.include_router(signals.router)           # prefix="/signals"
 router.include_router(journals.router)          # prefix="/journals"
 router.include_router(trading.router)           # prefix="/trading"
+router.include_router(shadow_trades.router)     # prefix="/shadow-trades"
 router.include_router(metrics_endpoint.router)  # GET /metrics (Prometheus scrape)
 
 # 구현 예정 라우터 — Epic별 순서로 추가

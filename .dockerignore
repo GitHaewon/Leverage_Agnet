@@ -1,0 +1,31 @@
+# Python 가상환경
+backend/.venv
+**/.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Node
+frontend/node_modules
+frontend/.next
+
+# Git
+.git
+.gitignore
+
+# 환경변수 (보안)
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 에디터
+.vscode
+.idea
+**/*.swp

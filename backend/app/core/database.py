@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
@@ -26,6 +28,20 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False,
     autocommit=False,
 )
+
+
+@asynccontextmanager
+async def celery_session():
+    """Celery 태스크 전용 세션. NullPool로 event loop 경계 문제를 방지한다."""
+    _engine = create_async_engine(settings.async_database_url, poolclass=NullPool)
+    _factory = async_sessionmaker(
+        _engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
+    )
+    try:
+        async with _factory() as session:
+            yield session
+    finally:
+        await _engine.dispose()
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

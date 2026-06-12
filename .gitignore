@@ -43,6 +43,10 @@ logs/
 # Docker
 *.override.yml
 
+# Celery 런타임 생성 파일
+celerybeat-schedule
+celerybeat.pid
+
 # Secrets (절대 커밋 금지)
 *.pem
 *.key

@@ -221,6 +221,55 @@ export const wsSignalNewSchema = z.object({
   timestamp: z.string(),
 })
 
+// ── Shadow Trades ─────────────────────────────────────────────────────────────
+
+export const shadowTradeSchema = z.object({
+  id: z.string(),
+  coin: z.string(),
+  symbol: z.string(),
+  direction: z.enum(["LONG", "SHORT"]),
+  entry_price: z.string(),
+  tp_price: z.string(),
+  sl_price: z.string(),
+  quantity: z.string(),
+  leverage: z.number(),
+  status: z.enum(["OPEN", "TP_HIT", "SL_HIT", "CANCELLED"]),
+  opened_at: z.string(),
+  exit_price: z.string().nullable().optional(),
+  pnl_usdt: z.number().nullable().optional(),
+  duration_seconds: z.number().nullable().optional(),
+  closed_at: z.string().nullable().optional(),
+})
+
+export const shadowTradesResponseSchema = z.object({
+  data: z.object({
+    items: z.array(shadowTradeSchema),
+    total: z.number(),
+    limit: z.number(),
+    offset: z.number(),
+    has_next: z.boolean(),
+  }),
+})
+
+export const shadowTradeStatsSchema = z.object({
+  data: z.object({
+    total_trades: z.number(),
+    open_trades: z.number(),
+    closed_trades: z.number(),
+    tp_hit: z.number(),
+    sl_hit: z.number(),
+    win_rate: z.number(),
+    total_pnl_usdt: z.number(),
+    avg_pnl_usdt: z.number(),
+    best_pnl_usdt: z.number().nullable(),
+    worst_pnl_usdt: z.number().nullable(),
+    avg_duration_minutes: z.number().nullable(),
+  }),
+})
+
+export type ShadowTrade = z.infer<typeof shadowTradeSchema>
+export type ShadowTradeStats = z.infer<typeof shadowTradeStatsSchema>["data"]
+
 // ── Inferred types ────────────────────────────────────────────────────────────
 
 export type User = z.infer<typeof userSchema>

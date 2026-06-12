@@ -25,10 +25,14 @@ from app.models.notification import Notification
 from app.models.refresh_token import RefreshToken
 from app.models.audit_log import AuditLog
 from app.models.ohlcv import OHLCV
+from app.models.shadow_trade import ShadowTrade
+from app.models.trade_journal import TradeJournal
+from app.models.reflection_report import ReflectionReport
 
 __all__ = [
     "Base", "PrimaryKeyMixin", "SoftDeleteMixin", "TimestampMixin",
     "User", "Subscription", "UserSettings", "ExchangeAccount",
     "Signal", "Position", "Order", "TradeLog", "AgentDecision",
-    "Notification", "RefreshToken", "AuditLog", "OHLCV",
+    "Notification", "RefreshToken", "AuditLog", "OHLCV", "ShadowTrade",
+    "TradeJournal", "ReflectionReport",
 ]

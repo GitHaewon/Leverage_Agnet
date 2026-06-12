@@ -24,8 +24,8 @@ from agents.analyst.parser import _safe_hold, parse_response
 from agents.analyst.prompt import SYSTEM_PROMPT, build_user_prompt
 
 _DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
-_DEFAULT_MAX_TOKENS = 2000  # reasoning model(gpt-5-mini-2025-08-07)은 reasoning token 포함 전체 한도
-_DEFAULT_TEMPERATURE = 0.1
+_DEFAULT_MAX_TOKENS = 4000  # reasoning model은 reasoning token을 내부 소모 → 실제 출력에 충분한 여유 필요
+_DEFAULT_TEMPERATURE = 1.0
 
 # 하위 에이전트 점수가 이 임계값 이하이면 LLM 호출 스킵 (AGENTS.md §5.6)
 _SKIP_THRESHOLD = 0.05
