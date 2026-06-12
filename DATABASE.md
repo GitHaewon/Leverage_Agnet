@@ -1216,13 +1216,13 @@ CREATE TABLE agent_decisions (
 
     -- 에이전트 출력 핵심값 (쿼리 최적화용 — JSONB 파싱 불필요)
     score                   DECIMAL(5,4),               -- -1.0 ~ 1.0 (분석 에이전트만)
-    reasoning               TEXT,                       -- Claude 근거 텍스트 (synthesis만)
+    reasoning               TEXT,                       -- AI reviewer 검토 근거 (reviewer만)
     is_approved             BOOLEAN,                    -- Risk Manager 승인 여부
 
     -- 성능 추적
     latency_ms              INTEGER         NOT NULL,
-    model_used              VARCHAR(50),                -- 'claude-sonnet-4-6' (synthesis만)
-    tokens_input            INTEGER,                    -- Anthropic API 토큰
+    model_used              VARCHAR(50),                -- 'gpt-5' (reviewer만)
+    tokens_input            INTEGER,                    -- OpenAI API 토큰
     tokens_output           INTEGER,
     api_cost_usd            DECIMAL(10,6),              -- API 호출 비용 추적
 

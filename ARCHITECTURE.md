@@ -56,7 +56,7 @@ graph TD
 
     subgraph EXTERNAL["EXTERNAL APIs"]
         BN["Binance\nREST + WebSocket"]
-        ANT["Anthropic\nClaude Sonnet API"]
+        ANT["OpenAI\nGPT API"]
         STR["Stripe\nSubscription"]
         TGAPI["Telegram API"]
         NEWS["CryptoCompare\nNews API"]
@@ -86,7 +86,7 @@ graph TD
     RS --> NW
 
     AW -->|OHLCV request| BN
-    AW -->|Claude API| ANT
+    AW -->|OpenAI API| ANT
     AW -->|news| NEWS
     OW -->|place order| BN
     NW -->|send message| TGAPI
@@ -395,7 +395,7 @@ backend/
 │   ├── technical_analyst.py
 │   ├── sentiment_agent.py
 │   ├── market_structure.py
-│   ├── synthesis_agent.py      # Claude Sonnet 호출
+│   ├── synthesis_agent.py      # DEPRECATED — see agents/decision/, agents/synthesis/
 │   └── risk_manager.py
 │
 ├── workers/                    # Celery 태스크
@@ -1377,7 +1377,7 @@ logger.error(
     "postgresql":         {"status": "ok", "latency_ms": 3},
     "redis":              {"status": "ok", "latency_ms": 1},
     "binance_api":        {"status": "ok", "latency_ms": 45},
-    "anthropic_api":      {"status": "ok", "latency_ms": 120},
+    "openai_api":         {"status": "ok", "latency_ms": 120},
     "celery_workers":     {"status": "ok", "active_workers": 4}
   },
   "version": "1.0.0",
@@ -1402,7 +1402,7 @@ pydantic-settings = "^2.7"
 celery = {extras = ["redis"], version = "^5.4"}
 redis = {extras = ["hiredis"], version = "^5.2"}
 langgraph = "^0.2"
-anthropic = "^0.40"
+openai = "^1.50"
 pandas-ta = "^0.3"
 transformers = "^4.47"          # FinBERT
 python-jose = "^3.3"            # JWT

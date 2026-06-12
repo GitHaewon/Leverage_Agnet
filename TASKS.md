@@ -224,14 +224,18 @@
 
 ---
 
-### E-04-F-04: Synthesis Agent (Claude Sonnet)
+### E-04-F-04: DecisionEngine + Reviewer Agent (GPT-5)
+
+> **리팩토링 완료:** T-04-11~14의 원래 계획(Claude Sonnet 기반 Synthesis Agent)은 결정적 파이프라인으로 대체되었다.
+> 현행 구현: `agents/decision/` (결정적 TradeCandidate 생성) + `agents/synthesis/` (GPT-5 APPROVE/REJECT 검토).
+> 참조: [docs/DECISION_FLOW.md](docs/DECISION_FLOW.md)
 
 | ID | Task | 소요시간 | 우선순위 | 선행 작업 |
 |----|------|:--------:|:--------:|----------|
-| T-04-11 | Anthropic SDK 설정 (`settings.CLAUDE_MODEL` 환경변수, temperature=0.1) | 1h | P0 | T-01-04 |
-| T-04-12 | Synthesis Agent SYSTEM_PROMPT 작성 (종합 판단 기준, 출력 JSON 스키마, 신뢰도 기준) | 2h | P0 | T-04-11 |
-| T-04-13 | Synthesis Agent USER_PROMPT 빌더 (세 에이전트 점수 + 시장 스냅샷 → 구조화 입력) | 2h | P0 | T-04-12 |
-| T-04-14 | Synthesis Agent 구현 (Claude API 호출 → 방향/신뢰도/근거 3줄 파싱, 실패 시 HOLD 처리) | 3h | P0 | T-04-13 |
+| T-04-11 | OpenAI SDK 설정 (`settings.OPENAI_MODEL` 환경변수, temperature=0.0) | 1h | P0 | T-01-04 |
+| T-04-12 | DecisionEngine 6-stage 체인 구현 (market_regime → chart_score → sentiment → derivatives → strategy → TradeCandidate) | 4h | P0 | T-04-11 |
+| T-04-13 | ReviewerAgent SYSTEM_PROMPT 작성 (TradeCandidate 검토, APPROVE/REJECT JSON 출력) | 2h | P0 | T-04-12 |
+| T-04-14 | ReviewerAgent 구현 (OpenAI API 호출 → decision/confidence/rationale 파싱, 모든 실패 → 안전 REJECT) | 3h | P0 | T-04-13 |
 
 ---
 
@@ -252,7 +256,7 @@
 | ID | Task | 소요시간 | 우선순위 | 선행 작업 |
 |----|------|:--------:|:--------:|----------|
 | T-04-20 | `AgentState` TypedDict 정의 + LangGraph 그래프 구조 설계 (병렬 실행 노드) | 2h | P0 | T-04-14, T-04-19 |
-| T-04-21 | LangGraph 그래프 빌드: TA + Sentiment + MS 병렬 (`asyncio.gather`) → Synthesis → Risk 순차 실행 | 4h | P0 | T-04-20 |
+| T-04-21 | 10-step 파이프라인 빌드: TA + MS 병렬 → DecisionEngine → ReviewerAgent → RiskEngine → FinalDecision | 4h | P0 | T-04-20 |
 | T-04-22 | 승인된 시그널 → `signals` 테이블 저장 + `agent_decisions` 스냅샷 저장 | 2h | P0 | T-04-01, T-04-21 |
 | T-04-23 | 시그널 → Redis Streams 발행 (`stream:signals`) | 1h | P0 | T-04-22, T-01-12 |
 | T-04-24 | Celery Beat 5분 주기 분석 태스크 (BTC, ETH 병렬 실행) | 2h | P0 | T-04-23, T-01-11 |
@@ -561,7 +565,7 @@
 | ID | Task | 소요시간 | 우선순위 | 선행 작업 |
 |----|------|:--------:|:--------:|----------|
 | T-10-12 | Binance Testnet 통합 테스트 (`BINANCE_TESTNET=true`, 시장가 주문 → TP/SL 설정 → 청산) | 6h | P0 | T-05-06, T-10-02 |
-| T-10-13 | AI 파이프라인 통합 테스트 (Claude API Mock, 시그널 생성 → DB 저장 → Redis 발행) | 4h | P0 | T-04-22, T-10-02 |
+| T-10-13 | AI 파이프라인 통합 테스트 (OpenAI API Mock — ReviewerAgent, TradeCandidate 검토 → DB 저장 → Redis 발행) | 4h | P0 | T-04-22, T-10-02 |
 | T-10-14 | Stripe Webhook E2E 테스트 (`stripe-cli` 이벤트 주입 → 플랜 동기화 확인) | 2h | P0 | T-09-05, T-10-01 |
 | T-10-15 | 전체 자동매매 시나리오 E2E: 회원가입 → Binance 연결 → 시그널 생성 → 주문 → TP 달성 → 알림 | 8h | P0 | T-10-12, T-10-13 |
 
@@ -656,5 +660,5 @@ E-05 작업 시작 전 반드시 확인:
 □ 출금 권한 API Key 등록 차단 로직이 T-03-04에 구현되어 있는가?
 □ 모든 Binance 통합 테스트가 BINANCE_TESTNET=true 환경에서만 실행되는가?
 □ 주문 실행 서비스 테스트 커버리지 ≥ 95% (T-10-05) 없이 PR merge 금지
-□ claude-sonnet-4-6 외 AI 모델 사용 금지 (settings.CLAUDE_MODEL 환경변수 확인)
+□ gpt-5 외 AI 모델 사용 금지 (settings.OPENAI_MODEL 환경변수 확인)
 ```

@@ -13,7 +13,7 @@
 2. [Technical Analysis Agent](#2-technical-analysis-agent)
 3. [Sentiment Agent](#3-sentiment-agent)
 4. [Market Structure Agent](#4-market-structure-agent)
-5. [Synthesis Agent](#5-synthesis-agent)
+5. [Reviewer Agent (GPT-5)](#5-reviewer-agent-gpt-5)
 6. [Risk Agent](#6-risk-agent)
 7. [Execution Agent](#7-execution-agent)
 8. [Journal Agent](#8-journal-agent)
@@ -591,158 +591,83 @@ API 호출: Binance REST API (5개 엔드포인트)
 
 ---
 
-## 5. Synthesis Agent
+## 5. Reviewer Agent (GPT-5)
 
 ### 5.1 역할
 
-Technical, Sentiment, Market Structure 에이전트의 점수와 원본 데이터를
-Claude Sonnet API에 전달하여 최종 트레이딩 시그널을 생성한다.
+DecisionEngine이 결정적 코드로 생성한 `TradeCandidate`를 검토하여 **APPROVE** 또는 **REJECT** 중 하나를 반환한다.
 
-이 에이전트가 시스템의 핵심 지능이다. 단순 가중합이 아닌 LLM의 맥락 이해를 활용하여
-세 에이전트가 포착하지 못한 패턴을 종합 판단한다.
+이 에이전트는 진입가·목표가·손절가·레버리지를 생성하거나 수정하지 않는다.
+모든 거래 파라미터는 DecisionEngine이 결정한다. AI 역할은 검토(review)뿐이다.
 
 ### 5.2 입력
 
 | 필드 | 소스 | 설명 |
 |------|------|------|
-| tech_score | Technical Agent | -1.0 ~ +1.0 |
-| tech_indicators | Technical Agent | 지표 상세값 |
-| sentiment_score | Sentiment Agent | -1.0 ~ +1.0 |
-| news_items | Sentiment Agent | 뉴스 목록 |
-| market_score | Market Structure Agent | -1.0 ~ +1.0 |
-| market_data | Market Structure Agent | OI, Funding 등 |
-| current_price | Redis | 실시간 가격 |
-| coin | 파이프라인 | 분석 대상 |
+| candidate | DecisionEngine | TradeCandidate (direction, entry, tp, sl, leverage, strategy, market_regime 등) |
+| chart_data | TechnicalResult | RSI/MACD/BB/EMA/ATR/Volume 지표 |
+| news_snippets | SentimentAgent | 최근 뉴스 헤드라인 |
+| market_snapshot | MarketStructureData | OI, Funding Rate, Long/Short 비율 |
 
 ### 5.3 출력
 
-| 필드 | 타입 | 제약 |
+| 필드 | 타입 | 설명 |
 |------|------|------|
-| direction | str | 'LONG' / 'SHORT' / 'HOLD' |
-| confidence | float | 0.60 ~ 1.0 (미만 시 HOLD 강제) |
-| entry_price | float | 현재가 기준 |
-| take_profit | float | R:R 2.0 이상 |
-| stop_loss | float | 필수 (None 불가) |
-| leverage | int | 1 ~ 20 |
-| rr_ratio | float | 2.0 이상 (미만 시 HOLD 강제) |
-| reasons | list[str] | 3줄 이상 근거 |
+| decision | str | `'APPROVE'` 또는 `'REJECT'` |
+| confidence | float | 0.70 ~ 1.0 (0.70 미만은 자동 REJECT) |
+| rationale | str | 검토 근거 (1~3문장) |
+| critical_contradiction | bool | True면 즉시 REJECT (기술·파생 데이터 간 심각한 모순) |
 
-### 5.4 Claude Sonnet 프롬프트 설계
+### 5.4 실패 처리
 
-```python
-# agents/synthesis_agent.py
+모든 실패 케이스는 **안전 REJECT**로 처리한다.
 
-SYSTEM_PROMPT = """
-You are a professional cryptocurrency futures trading analyst with 10+ years of experience.
-Your task is to synthesize multi-dimensional market data into a precise trading signal.
-
-RULES (non-negotiable):
-1. Direction must be LONG, SHORT, or HOLD only
-2. If confidence < 0.60, output HOLD regardless of your analysis
-3. Stop Loss is MANDATORY — never output a signal without stop_loss
-4. Minimum R:R ratio is 2.0 — if you cannot find a valid R:R, output HOLD
-5. Reasons must reference SPECIFIC indicator values (e.g., "RSI(14) = 42.3")
-6. Entry price should be current market price or next clear support/resistance
-7. Leverage must be conservative (5x for 60-70% confidence, 10x max for 90%+)
-
-OUTPUT FORMAT (strict JSON):
-{
-  "direction": "LONG|SHORT|HOLD",
-  "confidence": 0.00,
-  "entry_price": 0.0,
-  "take_profit": 0.0,
-  "stop_loss": 0.0,
-  "leverage": 0,
-  "rr_ratio": 0.0,
-  "reasons": ["reason1", "reason2", "reason3"]
-}
-"""
-
-def build_user_prompt(state: AgentState) -> str:
-    return f"""
-Analyze {state['coin']} (current price: ${state['current_price']:,.2f})
-
-=== TECHNICAL ANALYSIS (score: {state['tech_score']:+.2f}) ===
-{format_indicators(state['tech_indicators'])}
-Support: {state['support_levels']}
-Resistance: {state['resistance_levels']}
-
-=== SENTIMENT ANALYSIS (score: {state['sentiment_score']:+.2f}) ===
-Fear & Greed Index: {state['fear_greed_index']} ({state['fear_greed_label']})
-Recent news sentiment: {state['dominant_sentiment']}
-Key headlines:
-{format_news(state['news_items'][:5])}
-
-=== MARKET STRUCTURE (score: {state['market_score']:+.2f}) ===
-Funding Rate: {state['funding_rate']:.4%}
-OI Change (1h): {state['oi_1h_change_pct']:+.2f}%
-Long/Short Ratio: {state['long_short_ratio']:.2f} (Longs: {state['long_account_pct']:.1f}%)
-Whale Activity: {state['whale_activity']}
-
-=== COMPOSITE SIGNAL ===
-Weighted score: {calculate_weighted_score(state):+.2f}
-(Technical 40% + Market Structure 35% + Sentiment 25%)
-
-Generate your trading signal now.
-"""
-```
+| 실패 유형 | 처리 |
+|---------|------|
+| OpenAI API 타임아웃 | 재시도 1회 → 실패 시 REJECT |
+| JSON 파싱 실패 | REJECT |
+| `decision` 필드 누락 또는 비정상 값 | REJECT |
+| `confidence` < 0.70 | REJECT (`MIN_AI_REVIEW_CONFIDENCE`, `agents/decision/constants.py`) |
+| `critical_contradiction = True` | 즉시 REJECT |
+| 예외 발생 (네트워크, 인증 등) | REJECT |
 
 ### 5.5 실행 주기
 
 ```
-실행 방식: Celery Task (3개 에이전트 완료 후 실행)
-실행 주기: 5분
-타임아웃:  30초 (Claude API 응답 포함)
-모델:      claude-sonnet-4-6 (settings.CLAUDE_MODEL로 교체 가능)
-max_tokens: 500
-temperature: 0.1 (낮은 창의성 — 일관된 형식 출력)
+실행 방식: 10-step 파이프라인 Step 5 (DecisionEngine 완료 후 순차 실행)
+타임아웃:  15초
+모델:      settings.OPENAI_MODEL (기본값: gpt-5)
+temperature: 0.0 (결정론적 출력)
 ```
 
-### 5.6 실패 처리
-
-```
-- Claude API 타임아웃 → 재시도 1회 후 실패 → 해당 주기 시그널 미생성
-- JSON 파싱 실패 → Claude 응답 재파싱 시도 (structured output 강제)
-- confidence < 0.60 → HOLD 강제 변환 (파이프라인 계속 — Risk Agent에서 최종 검증)
-- rr_ratio < 2.0 → HOLD 강제 변환
-- Rate limit (429) → 5초 대기 후 재시도 (최대 2회)
-- 3개 하위 에이전트 점수 모두 0.0 → HOLD 즉시 반환 (Claude 호출 스킵)
-```
-
-### 5.7 예제 JSON
+### 5.6 예제 JSON
 
 ```json
-// agent_decisions.input_data
+// ReviewerAgent 출력 — APPROVE
 {
-  "coin": "BTC",
-  "current_price": 67450.0,
-  "tech_score": 0.72,
-  "sentiment_score": -0.31,
-  "market_score": 0.58,
-  "composite_score": 0.47,
-  "fear_greed_index": 42
+  "decision": "APPROVE",
+  "confidence": 0.84,
+  "rationale": "RSI oversold with MACD crossover confirmed, funding rate negative indicating short squeeze potential, R:R ratio adequate at 2.71.",
+  "critical_contradiction": false,
+  "model_used": "gpt-5",
+  "tokens_input": 620,
+  "tokens_output": 95,
+  "api_cost_usd": 0.00089
 }
 
-// agent_decisions.output_data
+// ReviewerAgent 출력 — REJECT
 {
-  "direction": "LONG",
-  "confidence": 0.87,
-  "entry_price": 67450.0,
-  "take_profit": 69200.0,
-  "stop_loss": 66800.0,
-  "leverage": 5,
-  "rr_ratio": 2.71,
-  "reasons": [
-    "RSI(14) = 42.3 과매도 진입 후 MACD 히스토그램 반전 확인, 4h봉 기준 상승 모멘텀",
-    "Funding Rate -0.02%(숏 과다), OI 1h +0.8% 동반 상승 — 숏 스퀴즈 가능성 높음",
-    "EMA200($64,200) 대비 현재가 +5%, 일봉 지지선 $66,800 접근 후 고래 매수 포착"
-  ],
-  "model_used": "claude-sonnet-4-6",
-  "tokens_input": 847,
-  "tokens_output": 203,
-  "api_cost_usd": 0.001523
+  "decision": "REJECT",
+  "confidence": 0.62,
+  "rationale": "Technical and sentiment signals diverge sharply; news sentiment strongly bearish while chart signals bullish — insufficient confluence.",
+  "critical_contradiction": true,
+  "model_used": "gpt-5",
+  "tokens_input": 594,
+  "tokens_output": 78
 }
 ```
+
+> **참고:** [docs/DECISION_FLOW.md](docs/DECISION_FLOW.md) — ReviewerAgent 실패 모드 전체 목록
 
 ---
 
@@ -750,7 +675,7 @@ temperature: 0.1 (낮은 창의성 — 일관된 형식 출력)
 
 ### 6.1 역할
 
-Synthesis Agent가 생성한 원시 시그널(raw signal)을 사용자 계좌 상태와 대조하여
+DecisionEngine이 생성하고 ReviewerAgent가 승인한 `TradeCandidate`를 사용자 계좌 상태와 대조하여
 최종 실행 가능 여부를 결정하고, 정확한 포지션 사이징을 계산한다.
 
 이 에이전트는 시스템의 최종 안전 게이트다.
@@ -758,7 +683,7 @@ Synthesis Agent가 생성한 원시 시그널(raw signal)을 사용자 계좌 �
 
 ### 6.2 입력
 
-**시그널 데이터 (Synthesis Agent 출력):**
+**시그널 데이터 (DecisionEngine + ReviewerAgent 출력):**
 
 | 필드 | 타입 | 설명 |
 |------|------|------|
@@ -1135,7 +1060,7 @@ async def monitor_position(position_id: UUID, user_id: UUID):
 ### 8.1 역할
 
 포지션 종료 이벤트를 수신하면 해당 거래의 전체 맥락을 수집하고,
-Claude Sonnet을 활용하여 전문적인 거래일지를 자동 생성한다.
+GPT-5(OpenAI)를 활용하여 전문적인 거래일지를 자동 생성한다.
 단순 기록이 아닌 성과 평가와 개선 제안까지 포함한 AI 코칭 리포트다.
 
 ### 8.2 입력
@@ -1172,7 +1097,7 @@ Claude Sonnet을 활용하여 전문적인 거래일지를 자동 생성한다.
 | next_time | str | 다음 번 행동 제안 |
 | tp_hit_pct | float | TP까지 달성한 % |
 
-### 8.4 Claude Sonnet 프롬프트
+### 8.4 GPT-5 프롬프트
 
 ```python
 JOURNAL_SYSTEM_PROMPT = """
@@ -1219,7 +1144,7 @@ Generate a detailed trading journal entry.
 실행 방식: 이벤트 기반 (포지션 close 후 즉시)
 트리거:    Execution Agent → Redis Streams (stream:journal)
 지연 목표: 포지션 종료 후 5분 이내 일지 완성
-타임아웃:  60초 (Claude API + DB 저장)
+타임아웃:  60초 (OpenAI API + DB 저장)
 ```
 
 ### 8.6 실패 처리
@@ -1345,7 +1270,7 @@ def detect_emotional_trading(trades: list[Trade]) -> list[EmotionalPattern]:
     return patterns
 ```
 
-### 9.5 Claude Sonnet 프롬프트
+### 9.5 GPT-5 프롬프트
 
 ```python
 REFLECTION_SYSTEM_PROMPT = """
@@ -1365,7 +1290,7 @@ Reference specific data (e.g., "화요일 승률 34%는 전체 평균 58%보다 
 ```
 실행 방식: Celery Beat (매주 월요일 09:00 KST)
 실행 조건: 최근 4주 거래 5건 이상 (미만 시 스킵)
-타임아웃:  120초 (데이터 집계 + Claude API)
+타임아웃:  120초 (데이터 집계 + OpenAI API)
 결과 전달: 이메일 + 텔레그램 + 웹 대시보드
 ```
 
@@ -1438,6 +1363,8 @@ Reference specific data (e.g., "화요일 승률 34%는 전체 평균 58%보다 
 ---
 
 ## 10. LangGraph State 설계
+
+> **DEPRECATED:** 이 섹션은 구 LangGraph 5-에이전트 설계를 기록한다. 현행 파이프라인은 10-step 결정적 파이프라인(`agents/orchestrator/pipeline.py`)으로 대체되었다. 참조: [docs/DECISION_FLOW.md](docs/DECISION_FLOW.md)
 
 ### 10.1 전체 AgentState
 
@@ -1612,10 +1539,10 @@ CIRCUIT_BREAKER_CONFIG = {
         "recovery_timeout": 30,      # 30초 후 Half-Open
         "expected_exception": [BinanceAPIException, asyncio.TimeoutError],
     },
-    "anthropic_api": {
+    "openai_api": {
         "failure_threshold": 3,
         "recovery_timeout": 60,
-        "expected_exception": [anthropic.APIStatusError, asyncio.TimeoutError],
+        "expected_exception": [openai.APIStatusError, asyncio.TimeoutError],
     },
     "cryptocompare_api": {
         "failure_threshold": 3,
@@ -1631,7 +1558,7 @@ CIRCUIT_BREAKER_CONFIG = {
 |-------|------|------|
 | Market Data Agent 다운 | Slack #ops-critical | 즉시 |
 | Execution Agent 실패 (3회) | Slack #ops-alerts + Email | 30초 |
-| Synthesis Agent 타임아웃 | Slack #ops-warnings | 5분 |
+| Reviewer Agent 타임아웃 | Slack #ops-warnings | 5분 |
 | 분석 에이전트 실패 | 로그만 | - |
 | 일일 손실 한도 도달 | Telegram 사용자 | 즉시 |
 | 청산가 10% 이내 | Telegram 사용자 | 즉시 |

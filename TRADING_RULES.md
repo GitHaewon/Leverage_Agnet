@@ -63,11 +63,13 @@ RISK_PROFILE_DEFAULT_LEVERAGE = {
 }
 ```
 
-### 1.4 AI 신뢰도별 추천 레버리지 (Synthesis Agent 출력)
+### 1.4 AI 신뢰도별 추천 레버리지 (ReviewerAgent 출력)
+
+ReviewerAgent `confidence` 0.70 미만은 FinalDecision에서 자동 REJECT된다.
+아래 표는 0.70 이상 신뢰도에 대한 레버리지 참고치다.
 
 | 신뢰도 (confidence) | 최대 추천 레버리지 | 근거 |
 |-------------------|----------------|------|
-| 60% ~ 70% | 3x | 불확실 — 최소 레버리지 |
 | 70% ~ 80% | 5x | 보통 — 표준 레버리지 |
 | 80% ~ 90% | 7x | 높음 — 중간 레버리지 |
 | 90% ~ 95% | 10x | 매우 높음 |
@@ -75,8 +77,7 @@ RISK_PROFILE_DEFAULT_LEVERAGE = {
 
 ```python
 def get_ai_recommended_leverage(confidence: float) -> int:
-    if confidence < 0.60:  raise ValueError("confidence < 0.60 should not reach here")
-    if confidence < 0.70:  return 3
+    if confidence < 0.70:  raise ValueError("confidence < 0.70 should not reach here")
     if confidence < 0.80:  return 5
     if confidence < 0.90:  return 7
     if confidence < 0.95:  return 10
@@ -1004,10 +1005,13 @@ async def run_risk_validation(
             return ValidationResult(approved=False, rejection_reason=reason)
 
         # ── CHECK 3: 신뢰도 ─────────────────────────────────
-        if signal.confidence < 0.60:
+        # 현행 파이프라인: AI confidence 검사는 RiskEngine이 아닌 FinalDecision에서 수행.
+        # 임계값 MIN_AI_REVIEW_CONFIDENCE = 0.70 (agents/decision/constants.py).
+        # ReviewerAgent가 0.70 미만 confidence를 반환하면 FinalDecision이 HOLD 처리한다.
+        if signal.confidence < 0.70:
             return ValidationResult(
                 approved=False,
-                rejection_reason=f"LOW_CONFIDENCE: {signal.confidence:.0%} < 60%"
+                rejection_reason=f"LOW_CONFIDENCE: {signal.confidence:.0%} < 70%"
             )
 
         # ── CHECK 4: 일일 손실 한도 ─────────────────────────
@@ -1156,7 +1160,7 @@ COOLDOWN_MINUTES                 = 30
 
 # ── 포지션 사이징 ─────────────────────────────────
 MIN_RR_RATIO                     = 2.0
-MIN_CONFIDENCE                   = 0.60
+MIN_AI_REVIEW_CONFIDENCE         = 0.70   # agents/decision/constants.py
 BINANCE_LOT_SIZES                = {"BTCUSDT": 0.001, "ETHUSDT": 0.01}
 BINANCE_MIN_NOTIONAL             = {"BTCUSDT": 5.0, "ETHUSDT": 5.0}
 
