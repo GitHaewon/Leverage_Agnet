@@ -1,21 +1,27 @@
 """
-Agent Orchestrator Pipeline.
+Agent Orchestrator Pipeline — 결정적 의사결정 플로우.
 
-8개 에이전트를 순서대로 실행하며, 각 단계 실패가 전체를 멈추지 않도록 격리한다.
+각 단계 실패가 전체를 멈추지 않도록 격리하며, 안전 원칙상 불확실성은 항상
+HOLD/REJECT로 귀결시킨다.
 
 실행 순서:
   1. MarketDataAgent      CRITICAL  실패 → FAILED
   2. TechnicalAnalysis    DEGRADED  실패 → 중립값(tech_score=0.0)으로 계속
   3. StrategyEngine       DEGRADED  실패 → 중립값으로 계속
-  4. AIAnalystAgent       CRITICAL  실패 → FAILED / HOLD → 이후 스텝 skip
-  5. RiskEngine           GATE      실패 → 보수적 REJECT
-  6. PortfolioManager     GATE      실패 → 보수적 REJECT
-  7. PositionManager      실패 → FAILED
-  8. ExecutionEngine      실패 → FAILED (retry=3)
+  4. DecisionEngine       결정적     국면/점수/전략선택/후보 생성. 예외 → HOLD
+                                     candidate.action=HOLD → HOLD
+  5. AI Reviewer          검토 전용   APPROVE/REJECT만. 파싱 실패/예외 → 안전 REJECT → HOLD
+  6. RiskEngine           GATE       validate_candidate. 예외/거부 → HOLD (실행 없음)
+  7. FinalDecision        결정적     candidate+review+risk 조립. HOLD → 실행 없음
+  8. PortfolioManager     GATE       실패/거부 → REJECTED
+  9. PositionManager      실패 → FAILED
+ 10. ExecutionEngine      실패 → FAILED (retry=3), TP/SL 실패 → 긴급 청산
 
 안전 원칙 (CLAUDE.md):
-  - RiskEngine 실패 기본값 = 거부 (실행하지 않음)
-  - 손절 없는 시그널은 RawSignal 생성 시점에 None-guard
+  - AI는 방향/진입가/TP/SL/레버리지/사이즈를 만들거나 바꿀 수 없다 — 검토만.
+  - RiskEngine이 Portfolio/PositionManager/Execution 직전의 최종 안전 게이트다.
+  - FinalDecision이 LONG/SHORT일 때만 실행 경로에 도달한다. HOLD는 실행 금지.
+  - 분류/점수/후보생성/AI리뷰/리스크/최종결정 중 어떤 예외도 HOLD/REJECT로 귀결.
 """
 from __future__ import annotations
 
@@ -29,7 +35,6 @@ from typing import Any, Awaitable, Callable, Optional, Protocol, runtime_checkab
 from agents.orchestrator.logger import OrchestratorLogger
 from agents.orchestrator.models import (
     AgentResult,
-    AgentStatus,
     PipelineContext,
     PipelineInput,
     PipelineResult,
@@ -67,31 +72,44 @@ class StrategyProvider(Protocol):
 
 
 @runtime_checkable
-class AnalystProvider(Protocol):
-    """AIAnalystAgent(Synthesis) 인터페이스."""
-    async def analyze(
+class DecisionProvider(Protocol):
+    """결정적 의사결정 체인 (DecisionEngine) 인터페이스."""
+    def run(
         self,
-        market: Any,
-        technical: Any,
-        strategy: Any,
+        *,
+        coin: str,
+        symbol: str,
+        market_snapshot: Any,
+        technical_result: Any,
+        strategy_signal: Any,
+        account_state: Any,
+        config: Any = None,
     ) -> Any: ...
 
 
 @runtime_checkable
+class ReviewerProvider(Protocol):
+    """AI 리뷰어 (ReviewerAgent) 인터페이스 — TradeCandidate 검토 전용."""
+    async def review(self, review_input: Any) -> Any: ...
+
+
+@runtime_checkable
 class RiskProvider(Protocol):
-    """RiskEngine 인터페이스."""
-    async def validate(
+    """RiskEngine 인터페이스 — 결정적 TradeCandidate 검증."""
+    async def validate_candidate(
         self,
-        signal: Any,
-        user_ctx: Any,
+        candidate: Any,
+        ctx: Any,
         account: Any,
-        *,
-        daily_loss_usdt: Any = None,
-        weekly_loss_usdt: Any = None,
-        weekly_limit_usdt: Any = None,
-        consecutive_losses: int = 0,
-        open_positions_count: int = 0,
-        same_coin_position: Any = None,
+        daily_loss_usdt: Any,
+        weekly_loss_usdt: Any,
+        weekly_limit_usdt: Any,
+        consecutive_losses: int,
+        open_positions_count: int,
+        same_coin_position: Any,
+        market_regime: Any = None,
+        funding_context: Any = None,
+        config: Any = None,
     ) -> Any: ...
 
 
@@ -137,12 +155,27 @@ class AlertDispatcherProvider(Protocol):
 
 # ── 스텝 설정 ──────────────────────────────────────────────────────────────────
 
+_STEP_NAMES: list[str] = [
+    "market_data",
+    "technical",
+    "strategy",
+    "decision",
+    "ai_review",
+    "risk",
+    "final_decision",
+    "portfolio",
+    "position_manager",
+    "execution",
+]
+
 _STEP_TIMEOUT: dict[str, float] = {
     "market_data":       10.0,
     "technical":         10.0,
     "strategy":           5.0,
-    "ai_analyst":        30.0,   # Claude API 포함
+    "decision":           5.0,
+    "ai_review":         30.0,   # OpenAI API 포함
     "risk":               5.0,
+    "final_decision":     3.0,
     "portfolio":          3.0,
     "position_manager":   3.0,
     "execution":         15.0,
@@ -152,8 +185,10 @@ _STEP_RETRIES: dict[str, int] = {
     "market_data":        2,
     "technical":          1,
     "strategy":           1,
-    "ai_analyst":         1,
-    "risk":               0,    # 실패 시 즉시 보수적 거부
+    "decision":           0,    # 결정적 — 재시도 무의미
+    "ai_review":          1,
+    "risk":               0,    # 실패 시 즉시 보수적 HOLD
+    "final_decision":     0,
     "portfolio":          0,
     "position_manager":   0,
     "execution":          3,    # 주문 실행은 재시도 중요
@@ -168,7 +203,8 @@ class OrchestratorDeps:
     market_data:      MarketDataProvider
     technical:        TechnicalAnalystProvider
     strategy:         StrategyProvider
-    analyst:          AnalystProvider
+    decision:         DecisionProvider
+    reviewer:         ReviewerProvider
     risk:             RiskProvider
     portfolio:        PortfolioProvider
     position_manager: PositionManagerProvider
@@ -181,12 +217,12 @@ class OrchestratorDeps:
 
 class OrchestratorPipeline:
     """
-    8-step 에이전트 순차 실행 파이프라인.
+    결정적 의사결정 플로우 파이프라인.
 
     사용 예:
-        deps   = OrchestratorDeps(market_data=..., technical=..., ...)
+        deps     = OrchestratorDeps(market_data=..., decision=..., reviewer=..., ...)
         pipeline = OrchestratorPipeline(deps)
-        result = await pipeline.run(PipelineInput(coin="BTC", user_id="...", ...))
+        result   = await pipeline.run(PipelineInput(coin="BTC", user_id="...", ...))
     """
 
     def __init__(
@@ -205,6 +241,7 @@ class OrchestratorPipeline:
         ctx = PipelineContext(coin=inp.coin, user_id=inp.user_id)
         steps: list[AgentResult] = []
         started = datetime.now(timezone.utc)
+        symbol = f"{inp.coin}USDT"
 
         async def _run_step(
             name: str,
@@ -254,21 +291,20 @@ class OrchestratorPipeline:
             return _finish(
                 PipelineStatus.FAILED,
                 rejection_reason="MarketData 수집 실패",
-                skip=["technical", "strategy", "ai_analyst",
-                      "risk", "portfolio", "position_manager", "execution"],
+                skip=_STEP_NAMES[1:],
             )
         ctx.market_snapshot = r1.output
         snap: dict = ctx.market_snapshot
 
         # ── Step 2: Technical Analysis ────────────────────────────────────────
-        ohlcv = snap.get("ohlcv", {})
+        ohlcv = snap.get("ohlcv", {}) if isinstance(snap, dict) else {}
         r2 = await _run_step(
             "technical",
             lambda: asyncio.to_thread(
                 self._deps.technical.run,
                 ohlcv,
                 inp.coin,
-                f"{inp.coin}USDT",
+                symbol,
             ),
         )
         if r2.failed:
@@ -280,10 +316,11 @@ class OrchestratorPipeline:
 
         # ── Step 3: Strategy Engine ───────────────────────────────────────────
         from agents.strategy.models import StrategyInput
+        current_price = snap.get("current_price", "0") if isinstance(snap, dict) else "0"
         strategy_inp = StrategyInput(
             coin=inp.coin,
-            symbol=f"{inp.coin}USDT",
-            current_price=Decimal(str(snap.get("current_price", "0"))),
+            symbol=symbol,
+            current_price=Decimal(str(current_price)),
             ta_result=ctx.tech_result,
         )
         r3 = await _run_step(
@@ -297,77 +334,147 @@ class OrchestratorPipeline:
         else:
             ctx.strategy_signal = r3.output
 
-        # ── Step 4: AI Analyst ────────────────────────────────────────────────
-        from agents.analyst.models import MarketContext, TechnicalContext, StrategyContext
-        market_ctx = MarketContext(
-            coin=inp.coin,
-            symbol=f"{inp.coin}USDT",
-            current_price=float(snap.get("current_price", 0.0)),
-        )
-        tech_ctx = _build_tech_context(ctx.tech_result)
-        strategy_ctx = _build_strategy_context(ctx.strategy_signal)
-
+        # ── Step 4: Decision Engine (결정적 후보 생성) ─────────────────────────
         r4 = await _run_step(
-            "ai_analyst",
-            lambda: self._deps.analyst.analyze(market_ctx, tech_ctx, strategy_ctx),
-        )
-        if r4.failed:
-            ctx.errors.append({"agent": "ai_analyst", "error": r4.error})
-            return _finish(
-                PipelineStatus.FAILED,
-                rejection_reason="AI 분석 실패",
-                skip=["risk", "portfolio", "position_manager", "execution"],
-            )
-        ctx.analyst_result = r4.output
-
-        # HOLD 판정 → 이후 스텝 불필요
-        if not ctx.analyst_result.is_actionable:
-            hold_reason = getattr(ctx.analyst_result, "hold_reason", "") or "HOLD"
-            return _finish(
-                PipelineStatus.HOLD,
-                rejection_reason=hold_reason,
-                skip=["risk", "portfolio", "position_manager", "execution"],
-            )
-
-        # ── RawSignal 생성 (이후 스텝 공통 입력) ────────────────────────────
-        from agents.risk.models import RawSignal
-        raw_signal = _build_raw_signal(inp.coin, ctx.analyst_result)
-        ctx.raw_signal = raw_signal
-
-        # ── Step 5: Risk Engine ───────────────────────────────────────────────
-        same_coin = _find_same_coin_position(inp.open_positions, inp.coin)
-        r5 = await _run_step(
-            "risk",
-            lambda: self._deps.risk.validate(
-                raw_signal,
-                inp.user_ctx,
-                inp.account_state,
-                daily_loss_usdt=inp.daily_loss_usdt,
-                weekly_loss_usdt=inp.weekly_loss_usdt,
-                weekly_limit_usdt=inp.weekly_limit_usdt,
-                consecutive_losses=inp.consecutive_losses,
-                open_positions_count=len(inp.open_positions),
-                same_coin_position=same_coin,
+            "decision",
+            lambda: asyncio.to_thread(
+                self._deps.decision.run,
+                coin=inp.coin,
+                symbol=symbol,
+                market_snapshot=snap,
+                technical_result=ctx.tech_result,
+                strategy_signal=ctx.strategy_signal,
+                account_state=inp.account_state,
+                config=getattr(inp, "decision_config", None),
             ),
         )
-        if r5.failed:
-            ctx.errors.append({"agent": "risk", "error": r5.error})
+        if r4.failed:
+            # 분류/점수/후보생성 예외 → 안전하게 HOLD
+            ctx.errors.append({"agent": "decision", "error": r4.error})
+            logger.warning("[pipeline] decision 실패 — HOLD: %s", r4.error)
             return _finish(
-                PipelineStatus.REJECTED,
-                rejection_reason="RiskEngine 실패 — 보수적 거부",
-                skip=["portfolio", "position_manager", "execution"],
+                PipelineStatus.HOLD,
+                rejection_reason="결정 단계 오류 — HOLD",
+                skip=_STEP_NAMES[4:],
             )
-        ctx.risk_result = r5.output
-        if not ctx.risk_result.approved:
+        ctx.decision_result = r4.output
+        candidate = getattr(ctx.decision_result, "candidate", None)
+        ctx.candidate = candidate
+
+        from agents.decision.models import FinalAction
+        if candidate is None or candidate.action == FinalAction.HOLD:
+            reason = _candidate_hold_reason(candidate)
             return _finish(
-                PipelineStatus.REJECTED,
-                rejection_reason=ctx.risk_result.rejection_reason,
-                skip=["portfolio", "position_manager", "execution"],
+                PipelineStatus.HOLD,
+                rejection_reason=reason,
+                skip=_STEP_NAMES[4:],
             )
 
-        # ── Step 6: Portfolio Manager ─────────────────────────────────────────
-        new_risk = getattr(ctx.risk_result, "max_loss_usdt", Decimal("0")) or Decimal("0")
+        # ── Step 5: AI Reviewer (검토 전용) ───────────────────────────────────
+        review_input = _build_review_input(symbol, ctx.decision_result, candidate)
+        r5 = await _run_step(
+            "ai_review",
+            lambda: self._deps.reviewer.review(review_input),
+        )
+        from agents.decision.models import AIReviewAction
+        if r5.failed:
+            # API 오류 등 — 안전 REJECT로 처리하고 HOLD
+            ctx.errors.append({"agent": "ai_review", "error": r5.error})
+            ctx.ai_review = _safe_reject_review(r5.error or "ai_review_failed")
+            logger.warning("[pipeline] ai_review 실패 — 안전 REJECT/HOLD: %s", r5.error)
+            return _finish(
+                PipelineStatus.HOLD,
+                rejection_reason="AI 리뷰 실패 — 안전 REJECT",
+                skip=_STEP_NAMES[5:],
+            )
+        ctx.ai_review = r5.output
+        if _review_action(ctx.ai_review) == AIReviewAction.REJECT:
+            reason = getattr(ctx.ai_review, "reason_summary", "") or "AI reviewer rejected candidate"
+            return _finish(
+                PipelineStatus.HOLD,
+                rejection_reason=reason,
+                skip=_STEP_NAMES[5:],
+            )
+
+        # ── RawSignal 생성 (legacy PositionManager / Execution 입력) ──────────
+        raw_signal = _build_raw_signal_from_candidate(
+            inp.coin, symbol, candidate, getattr(ctx.decision_result, "confidence", 0.0)
+        )
+        ctx.raw_signal = raw_signal
+
+        # ── Step 6: Risk Engine (최종 안전 게이트) ────────────────────────────
+        same_coin = _find_same_coin_position(inp.open_positions, inp.coin)
+        regime_result = getattr(ctx.decision_result, "regime", None)
         r6 = await _run_step(
+            "risk",
+            lambda: self._deps.risk.validate_candidate(
+                candidate,
+                inp.user_ctx,
+                inp.account_state,
+                inp.daily_loss_usdt or Decimal("0"),
+                inp.weekly_loss_usdt or Decimal("0"),
+                inp.weekly_limit_usdt or Decimal("0"),
+                inp.consecutive_losses,
+                len(inp.open_positions),
+                same_coin,
+                market_regime=regime_result,
+                funding_context=snap.get("funding_context") if isinstance(snap, dict) else None,
+            ),
+        )
+        if r6.failed:
+            # RiskEngine 예외 → 보수적으로 HOLD (실행 없음)
+            ctx.errors.append({"agent": "risk", "error": r6.error})
+            logger.warning("[pipeline] risk 예외 — HOLD: %s", r6.error)
+            return _finish(
+                PipelineStatus.HOLD,
+                rejection_reason="RiskEngine 예외 — 보수적 HOLD",
+                skip=_STEP_NAMES[6:],
+            )
+        ctx.risk_result = r6.output
+        if not getattr(ctx.risk_result, "approved", False):
+            failed_checks = getattr(ctx.risk_result, "failed_checks", []) or []
+            reason = getattr(ctx.risk_result, "rejection_reason", None) or "RiskEngine 거부"
+            logger.info(
+                "[pipeline] risk 거부 user=%s coin=%s failed_checks=%s reason=%s",
+                inp.user_id, inp.coin, failed_checks, reason,
+            )
+            return _finish(
+                PipelineStatus.HOLD,
+                rejection_reason=reason,
+                skip=_STEP_NAMES[6:],
+            )
+
+        # ── Step 7: Final Decision (결정적 조립) ───────────────────────────────
+        from agents.decision.final_decision import decide_final_action
+        r7 = await _run_step(
+            "final_decision",
+            lambda: asyncio.to_thread(
+                decide_final_action,
+                candidate,
+                ctx.ai_review,
+                ctx.risk_result,
+                getattr(inp, "decision_config", None),
+            ),
+        )
+        if r7.failed:
+            ctx.errors.append({"agent": "final_decision", "error": r7.error})
+            logger.warning("[pipeline] final_decision 예외 — HOLD: %s", r7.error)
+            return _finish(
+                PipelineStatus.HOLD,
+                rejection_reason="최종 결정 단계 오류 — HOLD",
+                skip=_STEP_NAMES[7:],
+            )
+        ctx.final_decision = r7.output
+        if ctx.final_decision.action == FinalAction.HOLD:
+            return _finish(
+                PipelineStatus.HOLD,
+                rejection_reason=ctx.final_decision.reason,
+                skip=_STEP_NAMES[7:],
+            )
+
+        # ── Step 8: Portfolio Manager ─────────────────────────────────────────
+        new_risk = getattr(ctx.risk_result, "max_loss_usdt", Decimal("0")) or Decimal("0")
+        r8 = await _run_step(
             "portfolio",
             lambda: asyncio.to_thread(
                 self._deps.portfolio.can_add_position,
@@ -376,25 +483,25 @@ class OrchestratorPipeline:
                 new_risk,
             ),
         )
-        if r6.failed:
-            ctx.errors.append({"agent": "portfolio", "error": r6.error})
+        if r8.failed:
+            ctx.errors.append({"agent": "portfolio", "error": r8.error})
             return _finish(
                 PipelineStatus.REJECTED,
                 rejection_reason="PortfolioManager 실패 — 보수적 거부",
-                skip=["position_manager", "execution"],
+                skip=_STEP_NAMES[8:],
             )
-        can_add, portfolio_reason = r6.output  # (bool, str)
-        ctx.portfolio_check = r6.output
+        can_add, portfolio_reason = r8.output  # (bool, str)
+        ctx.portfolio_check = r8.output
         if not can_add:
             return _finish(
                 PipelineStatus.REJECTED,
                 rejection_reason=portfolio_reason,
-                skip=["position_manager", "execution"],
+                skip=_STEP_NAMES[8:],
             )
 
-        # ── Step 7: Position Manager ──────────────────────────────────────────
+        # ── Step 9: Position Manager ──────────────────────────────────────────
         user_id_str = inp.user_id or ""
-        r7 = await _run_step(
+        r9 = await _run_step(
             "position_manager",
             lambda: asyncio.to_thread(
                 self._deps.position_manager.open,
@@ -403,16 +510,16 @@ class OrchestratorPipeline:
                 ctx.risk_result,
             ),
         )
-        if r7.failed:
-            ctx.errors.append({"agent": "position_manager", "error": r7.error})
+        if r9.failed:
+            ctx.errors.append({"agent": "position_manager", "error": r9.error})
             return _finish(
                 PipelineStatus.FAILED,
                 rejection_reason="PositionManager 실패",
-                skip=["execution"],
+                skip=_STEP_NAMES[9:],
             )
-        ctx.position_state = r7.output
+        ctx.position_state = r9.output
 
-        # ── Step 8: Execution Engine ──────────────────────────────────────────
+        # ── Step 10: Execution Engine ─────────────────────────────────────────
         from agents.execution.models import ExecutionRequest
         exec_req = ExecutionRequest(
             signal=raw_signal,
@@ -425,17 +532,17 @@ class OrchestratorPipeline:
             open_positions_count=len(inp.open_positions),
             same_coin_position=same_coin,
         )
-        r8 = await _run_step(
+        r10 = await _run_step(
             "execution",
             lambda: self._deps.execution.execute(exec_req),
         )
-        if r8.failed:
-            ctx.errors.append({"agent": "execution", "error": r8.error})
+        if r10.failed:
+            ctx.errors.append({"agent": "execution", "error": r10.error})
             return _finish(PipelineStatus.FAILED, rejection_reason="주문 실행 실패")
-        ctx.execution_result = r8.output
+        ctx.execution_result = r10.output
         er = ctx.execution_result
 
-        # ── TP/SL 실패 처리 ─────────────────────────────────────────────────
+        # ── TP/SL 실패 처리 (긴급 청산) ───────────────────────────────────────
         # engine.py가 재시도(1회) + 긴급 청산까지 처리한다.
         # 긴급 청산도 실패한 경우만 파이프라인이 FAILED를 반환한다.
         if er is not None and getattr(er, "emergency_close_failed", False):
@@ -457,11 +564,8 @@ class OrchestratorPipeline:
                 "tp_sl_failed_emergency_closed user_id=%s coin=%s",
                 inp.user_id, inp.coin,
             )
-            # Post-Trade Hook: 긴급 청산도 완료된 거래 — kill switch 손실 누적 필요
-            # entry 체결 후 즉시 청산됐으므로 max_loss_usdt(SL 기준 보수적 추정)로 누적
             if self._deps.post_trade_hook is not None:
                 await _fire_post_trade_hook(self._deps.post_trade_hook, inp, ctx)
-            # Alert: 사용자에게 긴급 청산 사실을 즉시 Telegram으로 통보
             if self._deps.alert_dispatcher is not None:
                 await _fire_emergency_alert(self._deps.alert_dispatcher, inp, ctx)
             return _finish(
@@ -469,9 +573,6 @@ class OrchestratorPipeline:
                 rejection_reason="TP/SL 설정 실패 — 긴급 청산 완료",
                 execution_result=er,
             )
-
-        # COMPLETED: TP/SL 걸린 포지션이 아직 열려 있음 — 미실현 P&L로 kill switch 누적 금지.
-        # 포지션이 실제로 닫히면(TP/SL 체결, 수동 청산) 모니터링 워커가 on_trade_closed()를 호출한다.
 
         return _finish(PipelineStatus.COMPLETED, execution_result=er)
 
@@ -483,10 +584,119 @@ def _append_skipped(
     names: list[str],
     reason: str = "",
 ) -> None:
+    # 이미 기록된 스텝은 중복으로 추가하지 않는다.
+    recorded = {s.agent_name for s in steps}
     for name in names:
+        if name in recorded:
+            continue
         s = AgentResult(agent_name=name)
         s.mark_skipped(reason)
         steps.append(s)
+
+
+def _candidate_hold_reason(candidate: Any) -> str:
+    if candidate is None:
+        return "후보 없음 — HOLD"
+    reasons = getattr(candidate, "reasons", None) or []
+    if reasons:
+        return str(reasons[-1])
+    return "candidate.action=HOLD — 실행 없음"
+
+
+def _review_action(ai_review: Any) -> Any:
+    return getattr(ai_review, "review_action", None)
+
+
+def _safe_reject_review(error: str) -> Any:
+    """AI 리뷰 단계 실패 시 사용할 안전 REJECT 결과."""
+    from agents.decision.models import AIReviewAction, AIReviewResult
+    return AIReviewResult(
+        review_action=AIReviewAction.REJECT,
+        confidence=0.0,
+        critical_contradiction=True,
+        risk_warnings=["ai_review_failed"],
+        reason_summary=f"AI review failed: {error}",
+    )
+
+
+def _build_review_input(symbol: str, decision_result: Any, candidate: Any) -> Any:
+    """DecisionResult + TradeCandidate → ReviewInput (간결한 검토 컨텍스트)."""
+    from agents.synthesis.models import ReviewInput
+
+    regime = getattr(decision_result, "regime", None)
+    chart = getattr(decision_result, "chart_score", None)
+    news = getattr(decision_result, "news_score", None)
+    deriv = getattr(decision_result, "derivatives_score", None)
+
+    def _f(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    regime_name = getattr(getattr(regime, "regime", None), "value", None) or "UNKNOWN"
+
+    return ReviewInput(
+        coin=candidate.coin,
+        symbol=symbol,
+        market_regime=regime_name,
+        regime_confidence=float(getattr(regime, "confidence", 0.0) or 0.0),
+        chart_long_score=float(getattr(chart, "long_score", 0.0) or 0.0),
+        chart_short_score=float(getattr(chart, "short_score", 0.0) or 0.0),
+        chart_risk_score=float(getattr(chart, "risk_score", 0.0) or 0.0),
+        chart_reasons=list(getattr(chart, "reasons", []) or []),
+        news_sentiment_score=float(getattr(news, "sentiment_score", 0.0) or 0.0),
+        news_risk_score=float(getattr(news, "risk_score", 0.0) or 0.0),
+        news_no_trade_flag=bool(getattr(news, "no_trade_flag", False)),
+        news_reasons=list(getattr(news, "reasons", []) or []),
+        deriv_risk_score=float(getattr(deriv, "risk_score", 0.0) or 0.0),
+        deriv_crowded_side=str(getattr(deriv, "crowded_side", "NONE") or "NONE"),
+        deriv_reasons=list(getattr(deriv, "reasons", []) or []),
+        strategy_type=getattr(candidate.strategy_type, "value", "UNKNOWN"),
+        expected_holding_minutes=int(candidate.expected_holding_minutes or 0),
+        action=getattr(candidate.action, "value", "HOLD"),
+        entry_price=_f(candidate.entry_price) or 0.0,
+        stop_loss=_f(candidate.stop_loss),
+        take_profit=_f(candidate.take_profit),
+        leverage=int(candidate.leverage or 0),
+        notional_size=_f(candidate.notional_size) or 0.0,
+        margin_ratio=float(candidate.margin_ratio or 0.0),
+        actual_rr=float(candidate.actual_rr or 0.0),
+        min_required_rr=float(candidate.min_required_rr or 0.0),
+        expected_net_profit=_f(candidate.expected_net_profit),
+        expected_net_loss=_f(candidate.expected_net_loss),
+        spread_bps=float(candidate.spread_bps or 0.0),
+        slippage_bps=float(candidate.slippage_bps or 0.0),
+        liquidation_price=_f(candidate.liquidation_price),
+    )
+
+
+def _build_raw_signal_from_candidate(
+    coin: str,
+    symbol: str,
+    candidate: Any,
+    confidence: float,
+) -> Any:
+    """
+    결정적 TradeCandidate → RawSignal (legacy PositionManager / Execution 호환).
+
+    confidence는 차트 우세 점수 기반 결정적 값이며 AI 산출물이 아니다.
+    방향/진입가/TP/SL/레버리지는 모두 candidate에서만 가져온다.
+    """
+    from agents.risk.models import RawSignal
+
+    return RawSignal(
+        direction=candidate.action.value,
+        coin=coin,
+        symbol=symbol,
+        confidence=float(confidence),
+        entry_price=candidate.entry_price,
+        take_profit=candidate.take_profit,
+        stop_loss=candidate.stop_loss,
+        leverage=candidate.leverage,
+    )
 
 
 def _neutral_ta_result() -> Any:
@@ -508,7 +718,6 @@ def _neutral_ta_result() -> Any:
 def _neutral_strategy_signal() -> Any:
     """StrategyEngine 실패 시 사용할 중립 결과."""
     from agents.strategy.models import AggregatedSignal
-    from decimal import Decimal
     return AggregatedSignal(
         direction="NO_TRADE",
         confidence=0.0,
@@ -519,57 +728,6 @@ def _neutral_strategy_signal() -> Any:
         rr_ratio=0.0,
         reasons=["strategy_engine_failed"],
         contributing_strategies=[],
-    )
-
-
-def _build_tech_context(tech_result: Any) -> Any:
-    from agents.analyst.models import TechnicalContext
-    return TechnicalContext(
-        tech_score=getattr(tech_result, "tech_score", 0.0),
-        timeframe_scores=getattr(tech_result, "timeframe_scores", {}),
-        indicators=getattr(tech_result, "indicators", {}),
-        signals_fired=getattr(tech_result, "signals_fired", []),
-        support_levels=getattr(tech_result, "support_levels", []),
-        resistance_levels=getattr(tech_result, "resistance_levels", []),
-    )
-
-
-def _build_strategy_context(strategy_signal: Any) -> Any:
-    from agents.analyst.models import StrategyContext
-    return StrategyContext(
-        sentiment_score=getattr(strategy_signal, "sentiment_score", 0.0),
-        fear_greed_index=getattr(strategy_signal, "fear_greed_index", 50),
-        fear_greed_label=getattr(strategy_signal, "fear_greed_label", "Neutral"),
-        dominant_sentiment=getattr(strategy_signal, "dominant_sentiment", "neutral"),
-        news_items=getattr(strategy_signal, "news_items", []),
-        market_score=getattr(strategy_signal, "market_score", 0.0),
-        funding_rate=getattr(strategy_signal, "funding_rate", 0.0),
-        oi_1h_change_pct=getattr(strategy_signal, "oi_1h_change_pct", 0.0),
-        long_short_ratio=getattr(strategy_signal, "long_short_ratio", 1.0),
-        long_account_pct=getattr(strategy_signal, "long_account_pct", 50.0),
-        whale_activity=getattr(strategy_signal, "whale_activity", "neutral"),
-    )
-
-
-def _build_raw_signal(coin: str, analyst_result: Any) -> Any:
-    """AnalystResult → RawSignal 변환."""
-    from agents.risk.models import RawSignal
-    decision = analyst_result.decision
-    # AnalysisDecision.confidence 는 int(0~100); RawSignal 은 float(0.0~1.0)
-    confidence_float = float(decision.confidence) / 100.0
-
-    stop_loss_raw = analyst_result.stop_loss
-    take_profit_raw = analyst_result.take_profit
-
-    return RawSignal(
-        direction=decision.decision,
-        coin=coin,
-        symbol=f"{coin}USDT",
-        confidence=confidence_float,
-        entry_price=Decimal(str(analyst_result.entry_price)),
-        take_profit=Decimal(str(take_profit_raw)) if take_profit_raw is not None else None,
-        stop_loss=Decimal(str(stop_loss_raw)) if stop_loss_raw is not None else None,
-        leverage=analyst_result.leverage,
     )
 
 
@@ -590,11 +748,6 @@ async def _fire_post_trade_hook(
     포지션 즉시 청산(EMERGENCY_CLOSED) 후 PostTradeHookProvider.on_trade_executed() 호출.
 
     COMPLETED 경로에서는 호출하지 않는다 — 포지션이 열려 있어 P&L이 확정되지 않았기 때문이다.
-
-    realized_pnl_usdt: emergency_close_order fill price로 계산한 확정 P&L.
-      - LONG:  (exit_px - entry_px) * qty
-      - SHORT: (entry_px - exit_px) * qty
-    emergency_close_order가 없으면 None → Adapter가 max_loss_usdt fallback 사용.
     """
     try:
         er = ctx.execution_result
@@ -609,7 +762,6 @@ async def _fire_post_trade_hook(
         max_loss   = float(getattr(ctx.risk_result, "max_loss_usdt", 0) or 0)
         direction  = getattr(raw, "direction", "LONG") if raw else "LONG"
 
-        # 실제 fill price로 확정 P&L 계산 (emergency_close_order가 있을 때만)
         realized_pnl: Optional[float] = None
         emergency_close_order = getattr(er, "emergency_close_order", None)
         if emergency_close_order is not None:
@@ -651,7 +803,6 @@ async def _fire_emergency_alert(
     EMERGENCY_CLOSED 발생 시 AlertDispatcher로 Telegram 알림 발송.
 
     실패해도 EMERGENCY_CLOSED 결과에 영향을 주지 않는다.
-    exit_price: 긴급 청산 체결가. 없으면 진입가를 fallback으로 사용.
     """
     try:
         from agents.alert.models import EmergencyClosedEvent

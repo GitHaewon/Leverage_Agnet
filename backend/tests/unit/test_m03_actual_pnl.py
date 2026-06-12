@@ -86,17 +86,7 @@ def _make_pipeline_deps(exec_result: ExecutionResult, hook=None):
         long_account_pct=50.0, whale_activity="neutral",
     ))
 
-    analyst_result = MagicMock()
-    analyst_result.is_actionable = True
-    analyst_result.hold_reason   = None
-    analyst_result.decision      = MagicMock(decision="LONG", confidence=80)
-    analyst_result.entry_price   = 50000.0
-    analyst_result.take_profit   = 55000.0
-    analyst_result.stop_loss     = 48000.0
-    analyst_result.leverage      = 5
-
-    analyst = AsyncMock()
-    analyst.analyze = AsyncMock(return_value=analyst_result)
+    decision, reviewer = _decision_and_reviewer()
 
     validation_mock = MagicMock()
     validation_mock.approved         = True
@@ -108,7 +98,7 @@ def _make_pipeline_deps(exec_result: ExecutionResult, hook=None):
     validation_mock.max_loss_usdt    = Decimal("200")
 
     risk = AsyncMock()
-    risk.validate = AsyncMock(return_value=validation_mock)
+    risk.validate_candidate = AsyncMock(return_value=validation_mock)
 
     portfolio = MagicMock()
     portfolio.can_add_position = MagicMock(return_value=(True, "OK"))
@@ -123,13 +113,50 @@ def _make_pipeline_deps(exec_result: ExecutionResult, hook=None):
         market_data=market_data,
         technical=technical,
         strategy=strategy,
-        analyst=analyst,
+        decision=decision,
+        reviewer=reviewer,
         risk=risk,
         portfolio=portfolio,
         position_manager=position_manager,
         execution=execution,
         post_trade_hook=hook,
     )
+
+
+def _decision_and_reviewer(direction: str = "LONG"):
+    """결정적 LONG/SHORT 후보 + AI APPROVE 리뷰어 mock (새 의사결정 플로우)."""
+    from agents.decision.engine import DecisionResult
+    from agents.decision.models import (
+        AIReviewAction, AIReviewResult, FinalAction, StrategyType, TradeCandidate,
+    )
+
+    is_long = direction == "LONG"
+    action = FinalAction.LONG if is_long else FinalAction.SHORT
+    candidate = TradeCandidate(
+        action=action, coin="BTC", symbol="BTCUSDT",
+        strategy_type=StrategyType.TREND_FOLLOWING, expected_holding_minutes=120,
+        entry_price=Decimal("50000"),
+        stop_loss=Decimal("48000") if is_long else Decimal("52000"),
+        take_profit=Decimal("55000") if is_long else Decimal("45000"),
+        leverage=5, margin_ratio=0.015, notional_size=Decimal("5000"),
+        actual_rr=2.5, min_required_rr=2.0,
+        expected_gross_profit=Decimal("250"), expected_gross_loss=Decimal("100"),
+        expected_fees=Decimal("5"), expected_slippage_cost=Decimal("3"),
+        expected_net_profit=Decimal("200"), expected_net_loss=Decimal("108"),
+        liquidation_price=Decimal("40000") if is_long else Decimal("60000"),
+        spread_bps=1.0, slippage_bps=3.0, reasons=[direction],
+    )
+    decision = MagicMock()
+    decision.run = MagicMock(return_value=DecisionResult(
+        regime=None, chart_score=None, news_score=None, derivatives_score=None,
+        strategy_selection=None, candidate=candidate, confidence=0.8,
+    ))
+    reviewer = AsyncMock()
+    reviewer.review = AsyncMock(return_value=AIReviewResult(
+        review_action=AIReviewAction.APPROVE, confidence=0.85,
+        critical_contradiction=False, risk_warnings=[], reason_summary="ok",
+    ))
+    return decision, reviewer
 
 
 def _mock_db_session(rowcount: int = 0):
@@ -216,21 +243,10 @@ async def test_emergency_closed_short_realized_pnl():
         emergency_close_failed=False,
     )
 
-    # analyst가 SHORT를 반환하도록 패치
-    from agents.orchestrator.pipeline import OrchestratorDeps
+    # 결정적 후보를 SHORT로 교체 → raw_signal.direction="SHORT" → hook이 SHORT PnL 계산
     deps = _make_pipeline_deps(er, hook=hook)
-    # analyst_result.decision.decision은 기본 "LONG" — SHORT는 raw_signal에 반영됨
-    # direction은 _fire_post_trade_hook에서 raw_signal.direction 사용
-    # 테스트를 위해 analyst를 SHORT로 교체
-    analyst_short = MagicMock()
-    analyst_short.is_actionable = True
-    analyst_short.hold_reason   = None
-    analyst_short.decision      = MagicMock(decision="SHORT", confidence=80)
-    analyst_short.entry_price   = 3000.0
-    analyst_short.take_profit   = 2700.0
-    analyst_short.stop_loss     = 3150.0
-    analyst_short.leverage      = 3
-    deps.analyst.analyze = AsyncMock(return_value=analyst_short)
+    short_decision, _ = _decision_and_reviewer("SHORT")
+    deps.decision = short_decision
 
     await OrchestratorPipeline(deps).run(_pipeline_input())
 

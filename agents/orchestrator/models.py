@@ -120,13 +120,16 @@ class PipelineContext:
     market_snapshot: Any = None    # step 1
     tech_result: Any = None        # step 2  TechnicalAnalysisResult
     strategy_signal: Any = None    # step 3  AggregatedSignal
-    analyst_result: Any = None     # step 4  AnalystResult
-    risk_result: Any = None        # step 5  ValidationResult
-    portfolio_check: Any = None    # step 6  (bool, str)
-    position_state: Any = None     # step 7  OpenResult
-    execution_result: Any = None   # step 8  ExecutionResult
+    decision_result: Any = None    # step 4  DecisionResult (regime/scores/candidate)
+    candidate: Any = None          # step 4  TradeCandidate
+    ai_review: Any = None          # step 5  AIReviewResult
+    risk_result: Any = None        # step 6  ValidationResult
+    final_decision: Any = None     # step 7  FinalDecision
+    portfolio_check: Any = None    # step 8  (bool, str)
+    position_state: Any = None     # step 9  OpenResult
+    execution_result: Any = None   # step 10 ExecutionResult
 
-    # step 4 이후 공유 시그널 (step 8 이후 PostTradeHook에서도 필요)
+    # decision 이후 공유 시그널 (execution 이후 PostTradeHook에서도 필요)
     raw_signal: Any = None
 
     errors: list[dict] = field(default_factory=list)

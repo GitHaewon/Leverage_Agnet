@@ -40,7 +40,9 @@ async def _build_deps(
     from agents.market_data.agent import MarketDataAgent
     from agents.technical_analysis.agent import TechnicalAnalysisAgent
     from agents.strategy.engine import StrategyEngine
-    from agents.analyst.agent import AnalystAgent, OpenAIClient
+    from agents.decision.engine import DecisionEngine
+    from agents.synthesis.agent import ReviewerAgent
+    from agents.analyst.agent import OpenAIClient
     from agents.risk.engine import RiskEngine
     from agents.portfolio.engine import PortfolioEngine
     from agents.position_manager.engine import PositionManagerEngine
@@ -104,7 +106,8 @@ async def _build_deps(
         market_data=MarketDataAgent(redis=redis),
         technical=TechnicalAnalysisAgent(),
         strategy=StrategyEngine(),
-        analyst=AnalystAgent(
+        decision=DecisionEngine(),
+        reviewer=ReviewerAgent(
             client=OpenAIClient(api_key=settings.OPENAI_API_KEY),
             model=settings.OPENAI_MODEL,
         ),
