@@ -84,6 +84,38 @@ python scripts/analyze_shadow_performance.py <path/to/app.log> -o my_summary.jso
 
 The script reads JSONL-formatted `decision_log` entries, computes aggregate metrics, prints a human-readable summary, and writes a machine-readable JSON file.
 
+## One-shot local smoke test
+
+Run a single local shadow decision without Binance order permissions, secrets, Redis,
+or database setup:
+
+```bash
+.venv/bin/python scripts/run_shadow_smoke.py --symbol BTCUSDT
+```
+
+The smoke runner refuses to start when `LIVE_TRADING_ENABLED=true`. By default it
+uses deterministic fake market data and a fake AI reviewer fixture, then runs the
+deterministic `DecisionEngine`, real `RiskEngine.validate_candidate`,
+`decide_final_action`, and `ShadowExecutionEngine` with an in-memory store. It
+writes JSONL output to:
+
+```bash
+logs/shadow_smoke_decisions.jsonl
+```
+
+Analyze the generated log with:
+
+```bash
+.venv/bin/python scripts/analyze_shadow_performance.py logs/shadow_smoke_decisions.jsonl
+```
+
+To explicitly call the real AI reviewer, pass `--use-real-ai` and ensure
+`OPENAI_API_KEY` is set:
+
+```bash
+.venv/bin/python scripts/run_shadow_smoke.py --symbol BTCUSDT --use-real-ai
+```
+
 **Metrics computed:**
 
 - Total signals evaluated, HOLD rate, execution rate
