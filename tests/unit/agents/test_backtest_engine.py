@@ -118,8 +118,8 @@ class TestTPHit:
 
         bars = [
             _bar(base,               open="67450", high="67450", low="67400", close="67450"),  # 신호 발생
-            _bar(base+timedelta(h=1), open="67460", high="67460", low="67400", close="67450"),  # 진입
-            _bar(base+timedelta(h=2), open="68000", high="69500", low="67900", close="69000"),  # TP 달성
+            _bar(base+timedelta(hours=1), open="67460", high="67460", low="67400", close="67450"),  # 진입
+            _bar(base+timedelta(hours=2), open="68000", high="69500", low="67900", close="69000"),  # TP 달성
         ]
 
         signals = [_signal(base, direction="LONG", entry="67450", tp="69200", sl="66800")]
@@ -143,8 +143,8 @@ class TestTPHit:
 
         bars = [
             _bar(base,               open="67450", high="67500", low="67400", close="67450"),
-            _bar(base+timedelta(h=1), open="67440", high="67440", low="67400", close="67430"),  # 진입
-            _bar(base+timedelta(h=2), open="66000", high="66200", low="65000", close="65200"),  # TP (SHORT TP=하락)
+            _bar(base+timedelta(hours=1), open="67440", high="67440", low="67400", close="67430"),  # 진입
+            _bar(base+timedelta(hours=2), open="66000", high="66200", low="65000", close="65200"),  # TP (SHORT TP=하락)
         ]
 
         signals = [_signal(base, direction="SHORT", entry="67450", tp="65000", sl="68500")]
@@ -172,8 +172,8 @@ class TestSLHit:
 
         bars = [
             _bar(base,               open="67450", high="67460", low="67440", close="67450"),
-            _bar(base+timedelta(h=1), open="67450", high="67460", low="67440", close="67450"),  # 진입
-            _bar(base+timedelta(h=2), open="67000", high="67000", low="65000", close="66000"),  # SL 달성
+            _bar(base+timedelta(hours=1), open="67450", high="67460", low="67440", close="67450"),  # 진입
+            _bar(base+timedelta(hours=2), open="67000", high="67000", low="65000", close="66000"),  # SL 달성
         ]
 
         signals = [_signal(base, direction="LONG", entry="67450", tp="70000", sl="66800")]
@@ -202,8 +202,8 @@ class TestWithCosts:
 
         bars = [
             _bar(base,               open="67450", high="67450", low="67400", close="67450"),
-            _bar(base+timedelta(h=1), open="67450", high="67450", low="67400", close="67450"),
-            _bar(base+timedelta(h=2), open="69200", high="70000", low="69200", close="69300"),
+            _bar(base+timedelta(hours=1), open="67450", high="67450", low="67400", close="67450"),
+            _bar(base+timedelta(hours=2), open="69200", high="70000", low="69200", close="69300"),
         ]
         signals = [_signal(base, tp="69200", sl="66800")]
 
@@ -234,8 +234,8 @@ class TestWithCosts:
 
         bars = [
             _bar(base,               open="67450", high="67450", low="67400", close="67450"),
-            _bar(base+timedelta(h=1), open="67450", high="67450", low="67400", close="67450"),
-            _bar(base+timedelta(h=2), open="69200", high="70000", low="69200", close="69300"),
+            _bar(base+timedelta(hours=1), open="67450", high="67450", low="67400", close="67450"),
+            _bar(base+timedelta(hours=2), open="69200", high="70000", low="69200", close="69300"),
         ]
         signals = [_signal(base, tp="69200", sl="66800")]
 
@@ -288,13 +288,13 @@ class TestMetricsIntegration:
             ts = base + timedelta(hours=i * 4)
             bars.extend([
                 _bar(ts,                 open="67450", high="67500", low="67400", close="67450"),
-                _bar(ts+timedelta(h=1),  open="67450", high="67500", low="67400", close="67450"),
+                _bar(ts+timedelta(hours=1),  open="67450", high="67500", low="67400", close="67450"),
             ])
             # 홀수: 상승(TP 달성), 짝수: 하락(SL 달성)
             if i % 2 == 0:
-                bars.append(_bar(ts+timedelta(h=2), open="69200", high="70000", low="69100", close="69300"))
+                bars.append(_bar(ts+timedelta(hours=2), open="69200", high="70000", low="69100", close="69300"))
             else:
-                bars.append(_bar(ts+timedelta(h=2), open="66500", high="66600", low="65000", close="65500"))
+                bars.append(_bar(ts+timedelta(hours=2), open="66500", high="66600", low="65000", close="65500"))
 
             signals.append(_signal(ts, tp="69200", sl="66800"))
 
@@ -318,8 +318,8 @@ class TestMetricsIntegration:
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         bars = [
             _bar(base,               open="67450", high="67600", low="67300", close="67450"),
-            _bar(base+timedelta(h=1), open="67450", high="67600", low="67300", close="67450"),
-            _bar(base+timedelta(h=2), open="69200", high="70000", low="69100", close="69300"),
+            _bar(base+timedelta(hours=1), open="67450", high="67600", low="67300", close="67450"),
+            _bar(base+timedelta(hours=2), open="69200", high="70000", low="69100", close="69300"),
         ]
         signals = [_signal(base, tp="69200", sl="66800")]
 

@@ -107,20 +107,15 @@ class _FixedDollarSizer:
         else:
             risk = config.risk_usdt
 
-        # USDT 금액도 안전 상한(%)으로 클리핑
+        # USDT 금액은 안전 상한(%)으로만 클리핑한다.
+        # 사용자가 지정한 고정 리스크를 최소치까지 올리는 것은 불필요한 위험 증가다.
         max_risk = account.total_balance * Decimal(str(config.max_risk_pct))
-        min_risk = account.total_balance * Decimal(str(config.min_risk_pct))
 
         if risk > max_risk:
             warnings.append(
                 f"FIXED_DOLLAR: ${risk:.2f} → 상한 ${max_risk:.2f} 적용 ({config.max_risk_pct:.1%})"
             )
             risk = max_risk
-        if risk < min_risk:
-            warnings.append(
-                f"FIXED_DOLLAR: ${risk:.2f} → 하한 ${min_risk:.2f} 적용 ({config.min_risk_pct:.1%})"
-            )
-            risk = min_risk
 
         return risk, None, warnings
 
@@ -388,9 +383,10 @@ def _build_sizing_result(
     리스크 금액 → 포지션 크기 공식 적용 → SizingResult 생성.
 
     공식 (TRADING_RULES.md §7.1):
-      sl_distance   = |entry - stop_loss|
-      position_size = risk_amount / sl_distance  (증거금 USDT)
-      quantity      = (position_size × leverage) / entry_price
+      sl_distance    = |entry - stop_loss|
+      quantity       = risk_amount / sl_distance
+      margin_used    = quantity × entry / leverage
+      position_value = quantity × entry
     """
     entry = signal.entry_price
     sl = signal.stop_loss  # type: ignore[assignment]
@@ -400,11 +396,11 @@ def _build_sizing_result(
     if sl_distance == 0:
         raise ValueError("entry와 stop_loss가 동일합니다")
 
-    # 포지션 크기 계산
-    margin_used = risk_amount / sl_distance
-    raw_qty = (margin_used * leverage) / entry
+    # 포지션 크기 계산: SL 도달 시 risk_amount만 손실되도록 코인 수량을 먼저 정한다.
+    raw_qty = risk_amount / sl_distance
     quantity = round_to_lot_size(raw_qty, symbol)
-    position_value = margin_used * leverage
+    position_value = quantity * entry
+    margin_used = position_value / Decimal(str(leverage))
 
     # R:R 계산
     rr = Decimal("0")
@@ -412,7 +408,7 @@ def _build_sizing_result(
     if tp is not None:
         ok, rr, _ = validate_rr_ratio(entry, tp, sl, signal.direction)
         if ok and rr > 0:
-            max_profit = risk_amount * rr
+            max_profit = quantity * abs(tp - entry)
 
     # 실제 적용된 리스크 비율
     actual_risk_pct = (

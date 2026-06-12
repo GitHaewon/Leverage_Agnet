@@ -163,7 +163,11 @@ def kelly_growth_rate(win_rate: float, avg_odds: float, kelly_fraction: float) -
     G = p × ln(1 + f*b) + q × ln(1 - f*)
     """
     import math
-    f = (win_rate * avg_odds - (1 - win_rate)) / avg_odds * kelly_fraction
+    full_kelly = (win_rate * avg_odds - (1 - win_rate)) / avg_odds
+    if full_kelly <= 0:
+        return float("-inf")
+
+    f = full_kelly * kelly_fraction
     if f >= 1.0 or f <= -1.0:
         return float("-inf")
     try:

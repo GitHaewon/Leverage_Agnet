@@ -95,12 +95,13 @@ class TestFixedRisk:
         TRADING_RULES.md §7.1 공식 검증:
         balance=10000, risk=2%, entry=67450, sl=66800, lev=5x
         → sl_distance=650, risk_amount=200
-        → margin=200/650=0.3077, qty=(0.3077×5)/67450≈0.022 BTC
+        → qty=200/650=0.3077 BTC → lot_size 내림 0.307 BTC
+        → margin=(0.307×67450)/5≈4141.43 USDT
         """
         config = SizingConfig(method=SizingMethod.FIXED_RISK, risk_pct=0.02)
         result = engine.calculate(config, _signal(), _account("10000"), 5, "BTCUSDT")
 
-        assert result.quantity == Decimal("0.022")
+        assert result.quantity == Decimal("0.307")
         assert result.max_loss == Decimal("200.00")
         assert result.final_leverage == 5
         assert result.method == SizingMethod.FIXED_RISK
@@ -133,7 +134,7 @@ class TestFixedRisk:
         large = engine.calculate(config, _signal(), _account("20000"), 5, "BTCUSDT")
 
         assert large.quantity > small.quantity
-        assert large.max_loss == small.max_loss * 2
+        assert large.max_loss == small.max_loss * 4
 
 
 # ════════════════════════════════════════════════════════════════
@@ -335,12 +336,13 @@ class TestCompareAll:
 
 class TestCommonValidation:
     def test_higher_leverage_more_quantity(self, engine: PositionSizingEngine) -> None:
-        """레버리지 높을수록 동일 리스크로 더 많은 수량."""
+        """레버리지는 동일 SL 리스크에서 수량이 아니라 필요 증거금을 줄인다."""
         config = SizingConfig(method=SizingMethod.FIXED_RISK, risk_pct=0.02)
         low_lev = engine.calculate(config, _signal(leverage=3), _account("10000"), 3, "BTCUSDT")
         high_lev = engine.calculate(config, _signal(leverage=10), _account("10000"), 10, "BTCUSDT")
 
-        assert high_lev.quantity > low_lev.quantity
+        assert high_lev.quantity == low_lev.quantity
+        assert high_lev.margin_used < low_lev.margin_used
         # 하지만 max_loss는 동일 (리스크 금액은 레버리지 무관)
         assert high_lev.max_loss == low_lev.max_loss
 
@@ -375,7 +377,7 @@ class TestCommonValidation:
             assert key in d, f"Missing key: {key}"
 
     def test_validate_sufficient_balance(self, engine: PositionSizingEngine) -> None:
-        config = SizingConfig(method=SizingMethod.FIXED_RISK, risk_pct=0.02)
+        config = SizingConfig(method=SizingMethod.FIXED_RISK, risk_pct=0.005)
         result = engine.calculate(config, _signal(), _account("10000"), 5, "BTCUSDT")
 
         ok, reason = engine.validate(
