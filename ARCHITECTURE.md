@@ -465,131 +465,115 @@ sequenceDiagram
 
 ## 4. Agent Architecture
 
-### 4.1 LangGraph 파이프라인
+> **Updated 2026-06-12 (Steps 1–17 refactor).** The pipeline is now deterministic-first with AI-as-reviewer. AI does not generate signals.
+
+### 4.1 10-Step 파이프라인 (현행)
 
 ```mermaid
 graph TD
     START(["START\nCelery Task\n5min trigger"])
 
-    subgraph PARALLEL["병렬 실행 (asyncio.gather)"]
-        TA["Technical Analyst\nAgent\n\nInput: OHLCV 6 timeframes\nTools: pandas-ta\nRSI / MACD / BB / EMA\nVolume / ATR / SR Lines\n\nOutput: tech_score -1.0~1.0"]
-        SA["Sentiment\nAgent\n\nInput: News / Fear&Greed\nTools: FinBERT transformer\nCryptoCompare API\n\nOutput: sentiment_score -1.0~1.0"]
-        MA["Market Structure\nAgent\n\nInput: Binance Futures data\nTools: Binance REST API\nOI / Funding Rate\nLong-Short Ratio\n\nOutput: market_score -1.0~1.0"]
-    end
+    MD["Step 1: Market Data\nOHLCV / OI / Funding\nSpread (Binance REST + WS)"]
+    TA["Step 2: Technical Analysis\nRSI / MACD / BB / EMA / Volume / ATR\n→ tech_score (TechnicalResult)"]
+    ST["Step 3: Strategy Engine\nSignalScore\n(long_score / short_score / no_trade / risk)"]
 
-    SYN["Synthesis\nAgent\n\nModel: claude-sonnet-4-6\nInput: 3 agent scores + raw data\nTask: weighted aggregation\nConfidence calculation\n3-line reason generation\n\nOutput: direction + confidence + reasons"]
+    DE["Step 4: Decision Engine\n결정적 코드\n① classify_market_regime\n② score_chart_signals\n③ score_news_sentiment\n④ score_derivatives_market\n⑤ select_strategy_type\n⑥ generate_trade_candidate\n→ TradeCandidate (entry/SL/TP/lev/size)"]
 
-    RM["Risk Manager\nAgent\n\nInput: signal + user account state\nValidation:\n  SL existence check\n  R:R >= 2.0 check\n  leverage cap (min of AI vs user max)\n  portfolio risk check\n  daily loss limit check\n\nOutput: APPROVED signal OR REJECTED"]
+    REV["Step 5: Reviewer Agent (GPT-5)\nAPPROVE / REJECT only\n신뢰도 0.0~1.0\nAI는 숫자를 변경하지 않는다"]
 
-    PUBLISH["Publish to\nRedis Streams\nsignal queue"]
+    RISK["Step 6: RiskEngine.validate_candidate\nFinal Safety Gate\nSL 존재 / R:R ≥ 2.0 / 청산 거리\n스프레드·슬리피지 / 손실 한도 / 킬스위치"]
 
-    DROP["DROP\nno publish"]
+    FD["Step 7: decide_final_action\nFinalDecision: LONG / SHORT / HOLD\nHOLD if any gate fails"]
 
-    START --> PARALLEL
-    TA --> SYN
-    SA --> SYN
-    MA --> SYN
-    SYN --> RM
-    RM -->|approved| PUBLISH
-    RM -->|rejected| DROP
+    PORT["Step 8: Portfolio Check"]
+    PM["Step 9: Position Manager"]
+
+    EXE_LIVE["Step 10: ExecutionEngine\n실거래 (LIVE_TRADING_ENABLED=true)"]
+    EXE_SHAD["Step 10: ShadowExecutionEngine\nVirtual fill (mode=paper)"]
+
+    DROP["HOLD — 실행 없음\n결정 로그 기록"]
+
+    START --> MD --> TA --> ST --> DE --> REV --> RISK --> FD
+    FD -->|LONG or SHORT| PORT --> PM --> EXE_LIVE
+    FD -->|LONG or SHORT, shadow| PORT --> PM --> EXE_SHAD
+    FD -->|HOLD| DROP
+    DE -->|exception or HOLD candidate| DROP
+    REV -->|REJECT or confidence < 0.70| DROP
+    RISK -->|rejected| DROP
 ```
 
-### 4.2 에이전트별 구현 상세
+### 4.2 DecisionEngine 세부 체인
 
-#### Technical Analyst Agent
-```python
-# agents/technical_analyst.py
-
-INDICATORS = {
-    "rsi":      {"period": 14, "timeframes": ["1h", "4h"]},
-    "macd":     {"fast": 12, "slow": 26, "signal": 9},
-    "bb":       {"period": 20, "std": 2},
-    "ema":      {"periods": [9, 21, 50, 200]},
-    "atr":      {"period": 14},
-    "volume":   {"ma_period": 20},
-}
-
-# 점수 계산 로직
-# +1.0 → 강한 LONG 신호
-# -1.0 → 강한 SHORT 신호
-# 0.0  → 중립
-```
-
-#### Synthesis Agent (Claude Sonnet)
-```python
-# agents/synthesis_agent.py
-
-SYSTEM_PROMPT = """
-You are a professional crypto futures trading analyst.
-Given technical, sentiment, and market structure scores with raw data,
-provide a trading signal with:
-1. Direction: LONG / SHORT / HOLD
-2. Confidence: 0.0 to 1.0
-3. Entry, TP, SL prices with exact values
-4. Leverage recommendation (1-20x)
-5. Three specific reasons based on evidence
-
-Rules:
-- Minimum confidence to publish: 0.60
-- Minimum R:R ratio: 2.0
-- If R:R < 2.0, output HOLD regardless of direction
-- Reasons must reference specific indicator values
-"""
-```
-
-#### Risk Manager Agent
-```python
-# agents/risk_manager.py
-
-def validate_signal(signal: RawSignal, account: AccountState) -> ApprovedSignal:
-    assert signal.stop_loss is not None
-    assert signal.rr_ratio >= 2.0
-    assert signal.confidence >= 0.60
-
-    leverage = min(signal.leverage, account.max_leverage, 20)
-
-    size = (account.balance * account.risk_per_trade) / abs(
-        signal.entry - signal.stop_loss
-    )
-    quantity = (size * leverage) / signal.entry
-
-    assert account.daily_loss < account.daily_loss_limit
-    assert account.open_positions < account.max_concurrent_positions
-
-    return ApprovedSignal(quantity=quantity, leverage=leverage, ...)
-```
-
-### 4.3 LangGraph State Schema
+`agents/decision/engine.py`
 
 ```python
-class AgentState(TypedDict):
-    # 입력
-    coin: str
-    ohlcv: dict[str, pd.DataFrame]      # timeframe → OHLCV
-    market_data: MarketData              # OI, funding, L/S ratio
-    news_data: list[NewsItem]
-    fear_greed_index: int
-
-    # 에이전트 출력
-    tech_score: float
-    sentiment_score: float
-    market_score: float
-
-    # Synthesis 출력
-    direction: Literal["LONG", "SHORT", "HOLD"]
-    confidence: float
-    entry_price: float
-    take_profit: float
-    stop_loss: float
-    leverage: int
-    reasons: list[str]
-    rr_ratio: float
-
-    # Risk Manager 출력
-    approved: bool
-    quantity: float
-    rejection_reason: str | None
+class DecisionEngine:
+    def run(self, *, coin, symbol, market_snapshot, technical_result,
+            strategy_signal, account_state, config=None) -> DecisionResult:
+        regime         = classify_market_regime(market_snapshot, technical_result, strategy_signal)
+        chart_score    = score_chart_signals(technical_result, strategy_signal, regime)
+        news_score     = score_news_sentiment(market_snapshot, regime)
+        deriv_score    = score_derivatives_market(market_snapshot, regime)
+        strategy_sel   = select_strategy_type(regime, chart_score, news_score, deriv_score, ...)
+        candidate      = generate_trade_candidate(regime, chart_score, news_score,
+                                                  deriv_score, strategy_sel, ...)
+        return DecisionResult(regime, chart_score, news_score, deriv_score,
+                              strategy_sel, candidate, confidence, reasons)
 ```
+
+### 4.3 ReviewerAgent (AI 리뷰어)
+
+`agents/synthesis/agent.py`
+
+```python
+class ReviewerAgent:
+    async def review(self, review_input: ReviewInput) -> AIReviewResult:
+        # OpenAI API 호출 → JSON 파싱
+        # 실패 시 항상 안전 REJECT 반환 (APPROVE 절대 불가)
+        ...
+
+# AIReviewResult 필드
+review_action:          "APPROVE" | "REJECT"
+confidence:             float      # 0.0 ~ 1.0
+critical_contradiction: bool       # True → 즉시 HOLD
+risk_warnings:          list[str]  # 비차단 경고 목록
+```
+
+**AI 절대 규칙 (agents/synthesis/prompt.py):**
+1. TradeCandidate의 숫자(방향·진입가·TP·SL·레버리지·사이즈)를 변경 불가
+2. RiskEngine을 우회하거나 override 불가
+3. 주문 실행 권한 없음
+
+### 4.4 FinalDecision 조건
+
+`agents/decision/final_decision.py`
+
+```python
+# LONG 또는 SHORT 허용 조건 (모두 True여야 함)
+candidate.action in (LONG, SHORT)
+ai_review.review_action == APPROVE
+ai_review.confidence >= 0.70          # MIN_AI_REVIEW_CONFIDENCE
+ai_review.critical_contradiction == False
+risk_result.passed == True
+expected_net_profit > MIN_EXPECTED_NET_PROFIT_PCT × notional
+```
+
+### 4.5 Strategy R:R 및 예상 보유 시간
+
+| Strategy | Decision 최소 R:R | Risk Engine 최소 R:R | 예상 보유 |
+|---|---|---|---|
+| SCALPING | 1.2 | **2.0 (hard)** | 5분 |
+| INTRADAY | 1.5 | **2.0 (hard)** | 30분 |
+| TREND_FOLLOWING | 2.0 | 2.0 | 120분 |
+| BREAKOUT | 2.0 | 2.0 | 60분 |
+
+> SCALPING/INTRADAY의 Decision 레이어 R:R은 후보 생성 사전 필터이며 Risk Engine 하드 리미트를 대체하지 않는다.
+
+### 4.6 레거시 AnalystAgent (DEPRECATED)
+
+`agents/analyst/agent.py` `AnalystAgent`
+
+AI가 직접 시그널을 생성하던 구 경로. 프로덕션 파이프라인에서 더 이상 사용하지 않는다. `OpenAIClient`만 `ReviewerAgent`가 재사용 중이며, 향후 `agents/common/openai_client.py`로 이전 예정이다.
 
 ---
 

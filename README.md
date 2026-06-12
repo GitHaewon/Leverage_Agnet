@@ -34,16 +34,18 @@
 
 ### 1. AI 5개가 협력해서 판단한다
 
-다른 서비스는 보통 차트 지표 하나나 둘로 판단합니다. 이 서비스는 **전문이 다른 AI 에이전트 5개**가 각자의 분석을 내놓고, 마지막에 GPT가 종합 판단합니다.
+다른 서비스는 보통 차트 지표 하나나 둘로 판단합니다. 이 서비스는 **전문이 다른 분석 모듈 5개**가 각자의 분석을 내놓고, 결정적 코드가 거래 후보를 생성한 뒤, GPT가 검토합니다.
 
 ```
-차트 전문가 AI  →  RSI, MACD, 볼린저밴드 등 계산
-뉴스 전문가 AI  →  최신 뉴스 긍정/부정 감성 분석
-시장구조 AI     →  큰손 포지션, 선물 펀딩비 분석
-        ↓ 세 결과를 모두 받아서
-GPT-5 종합 AI  →  LONG / SHORT / HOLD 최종 결정
-        ↓ 결정이 나면
-리스크 검증 AI  →  안전 기준 충족 여부 최종 확인
+차트 전문가 AI   →  RSI, MACD, 볼린저밴드 등 계산
+뉴스 전문가 AI   →  최신 뉴스 긍정/부정 감성 분석
+시장구조 AI      →  큰손 포지션, 선물 펀딩비 분석
+          ↓ 세 결과를 결정적 코드로 종합
+결정 엔진        →  TradeCandidate 생성 (진입가·손절가·목표가·레버리지 확정)
+          ↓ 후보를 AI에게 검토 의뢰
+GPT-5 리뷰 AI   →  APPROVE / REJECT만 반환 (숫자 변경 불가)
+          ↓ 승인되면
+리스크 검증      →  손절·R:R·손실 한도 최종 확인
 ```
 
 어느 하나가 통과 안 되면 주문은 나가지 않습니다.
@@ -118,9 +120,10 @@ AI가 15분마다 자동으로 아래 단계를 실행합니다.
        "지금 큰손들이 어느 방향에 베팅하고 있는가?" 를 봅니다.
        미결제약정, 펀딩비, 롱/숏 비율을 확인합니다.
            ↓
-4단계  GPT-5 최종 판단
-       위 3가지 데이터를 모두 받아서 LONG / SHORT / HOLD 중 하나를 결정합니다.
-       신뢰도가 60% 미만이면 "지금은 거래하지 않는다"고 판단합니다.
+4단계  결정 엔진 (결정적 코드)
+       위 3가지 데이터를 종합해 거래 후보(진입가·손절가·목표가·레버리지)를 생성합니다.
+       GPT-5가 후보를 검토하고 APPROVE / REJECT를 반환합니다.
+       AI 신뢰도가 70% 미만이면 "지금은 거래하지 않는다"고 판단합니다.
            ↓
 5단계  리스크 검증  ← 이 단계는 절대 건너뛸 수 없습니다
        손절가가 있는가?
@@ -398,6 +401,181 @@ docker compose down
 | Stripe 구독 결제 | ✅ 완료 |
 | 웹 대시보드 | ✅ 완료 |
 | 최종 QA 및 베타 테스트 | 🔄 진행 중 |
+
+---
+
+---
+
+## Developer Reference
+
+> This section is for contributors and operators. The sections above are end-user documentation.
+
+### Safety warning
+
+This software is **not financial advice** and **does not guarantee profit**. Cryptocurrency futures trading can result in total loss of capital. Always run shadow trading for at least two weeks and review performance data before enabling live trading.
+
+---
+
+### Current architecture (Steps 1–17 refactor — 2026-06-12)
+
+**Deterministic decision + AI-as-reviewer. AI does not create signals.**
+
+```
+market_data → technical → strategy → decision → ai_review
+    → risk → final_decision → portfolio → position_manager → execution
+```
+
+| Layer | Component | Role |
+|---|---|---|
+| decision | `DecisionEngine` | Generates `TradeCandidate` deterministically |
+| ai_review | `ReviewerAgent` (GPT-5) | APPROVE / REJECT only — no numeric authority |
+| risk | `RiskEngine.validate_candidate` | Final safety gate (R:R, SL, loss limits, etc.) |
+| final_decision | `decide_final_action` | HOLD unless all three layers pass |
+| execution | `ExecutionEngine` or `ShadowExecutionEngine` | Real or paper order |
+
+For full details see [`docs/DECISION_FLOW.md`](docs/DECISION_FLOW.md).
+
+---
+
+### Strategy types and R:R
+
+| Strategy | Decision-layer min R:R | Expected hold |
+|---|---|---|
+| SCALPING | 1.2 | 5 min |
+| INTRADAY | 1.5 | 30 min |
+| TREND_FOLLOWING | 2.0 | 120 min |
+| BREAKOUT | 2.0 | 60 min |
+
+The **RiskEngine enforces a hard minimum of 2.0** on all candidates, regardless of strategy. See [`docs/RISK_ENGINE.md`](docs/RISK_ENGINE.md).
+
+---
+
+### Key environment variables
+
+```bash
+# Copy .env.example → .env. Never commit .env.
+cp .env.example .env
+```
+
+| Variable | Description |
+|---|---|
+| `OPENAI_API_KEY` | Required for ReviewerAgent (GPT-5 review step) |
+| `OPENAI_MODEL` | Model override. Default: `gpt-5`. Never hardcode in source. |
+| `BINANCE_ENCRYPT_KEY` | AES-256-GCM key for API key encryption. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| `BINANCE_TESTNET` | `true` during development. Switch to `false` only after full shadow validation. |
+| `LIVE_TRADING_ENABLED` | `false` during shadow period. Flip to `true` only after completing the pre-live checklist. |
+| `SHADOW_TRADING_ENABLED` | `true` to activate shadow mode (virtual fills, no real orders). |
+| `JWT_SECRET` / `JWT_REFRESH_SECRET` | Unique 32+ char random strings. |
+| `TELEGRAM_BOT_TOKEN` | Required for alert notifications. |
+| `STRIPE_SECRET_KEY` | Required for subscription billing. |
+
+---
+
+### Setup
+
+**Frontend only (no database required):**
+
+```bash
+cd frontend && npm install
+node mock-server.mjs &   # fake API
+npm run dev
+# Open http://localhost:3000  |  demo@trading.com / Demo1234!
+```
+
+**Full system (Docker):**
+
+```bash
+cp .env.example .env      # fill in OPENAI_API_KEY, keys above
+docker compose up -d      # ~2–3 min first run
+# Web:        http://localhost:3000
+# API docs:   http://localhost:8000/docs
+# Monitoring: http://localhost:3001  (admin / admin)
+docker compose down
+```
+
+**Backend tests only:**
+
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+---
+
+### Running key tests
+
+```bash
+# Full agents unit suite (533 tests)
+cd backend
+.venv/bin/python -m pytest tests/unit/agents/ --tb=short \
+  --noconftest --override-ini="addopts="
+
+# Decision flow only
+.venv/bin/python -m pytest tests/unit/agents/decision/ -v \
+  --noconftest --override-ini="addopts="
+
+# Pipeline + shadow logging
+.venv/bin/python -m pytest tests/unit/agents/test_orchestrator_pipeline.py -v \
+  --noconftest --override-ini="addopts="
+
+# Execution safety
+.venv/bin/python -m pytest tests/unit/agents/execution/ -v \
+  --noconftest --override-ini="addopts="
+
+# Emergency path integration tests
+.venv/bin/python -m pytest tests/unit/test_h03_on_trade_closed.py \
+  tests/unit/test_h04_tp_sl_failed.py tests/unit/test_m02_emergency_closed_hook.py \
+  tests/unit/test_m03_actual_pnl.py tests/unit/test_m04_emergency_closed_alert.py \
+  -v --noconftest --override-ini="addopts="
+```
+
+---
+
+### Shadow performance analysis
+
+```bash
+# After shadow period: extract decision_log lines from app log
+python scripts/analyze_shadow_performance.py path/to/app.log
+
+# Custom output file
+python scripts/analyze_shadow_performance.py path/to/app.log -o results.json
+```
+
+See [`docs/SHADOW_TRADING.md`](docs/SHADOW_TRADING.md) for how to interpret results.
+
+---
+
+### Pre-live trading checklist
+
+Complete every item in [`docs/LIVE_TRADING_CHECKLIST.md`](docs/LIVE_TRADING_CHECKLIST.md) before setting `LIVE_TRADING_ENABLED=true`.
+
+---
+
+### Known test / environment issues
+
+See [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) for:
+- `celery` not installed → shadow monitor tests skip
+- `websockets` not installed → market data tests fail
+- Wiring test `sys.modules` pollution
+- SCALPING/INTRADAY R:R vs RiskEngine minimum (design trade-off)
+- `OpenAIClient` in deprecated `agents/analyst/` (migration TODO)
+
+---
+
+### Documentation index
+
+| File | Contents |
+|---|---|
+| [`docs/DECISION_FLOW.md`](docs/DECISION_FLOW.md) | 10-step pipeline, DecisionEngine, AI reviewer, FinalDecision |
+| [`docs/RISK_ENGINE.md`](docs/RISK_ENGINE.md) | Safety checks, sizing formula, kill switch, emergency close |
+| [`docs/SHADOW_TRADING.md`](docs/SHADOW_TRADING.md) | Shadow mode setup, performance analysis |
+| [`docs/LIVE_TRADING_CHECKLIST.md`](docs/LIVE_TRADING_CHECKLIST.md) | Pre-live verification steps |
+| [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) | Environment issues and design trade-offs |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Full system architecture (frontend, backend, DB, queues) |
+| [`AGENTS.md`](AGENTS.md) | Agent design details |
+| [`TRADING_RULES.md`](TRADING_RULES.md) | Risk rule reference (1:1 with RiskEngine code) |
+| [`CLAUDE.md`](CLAUDE.md) | Absolute development rules (CTO authority) |
 
 ---
 

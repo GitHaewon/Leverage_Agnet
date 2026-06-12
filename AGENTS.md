@@ -1,8 +1,8 @@
 # AI Trading Copilot — Agent Design Document
 
 > 작성일: 2026-06-04
-> 버전: v1.0
-> 참조: CLAUDE.md, ARCHITECTURE.md, DATABASE.md, PRD.md
+> 버전: v2.0 (2026-06-12 업데이트: Steps 1–17 결정적 파이프라인 반영)
+> 참조: CLAUDE.md, ARCHITECTURE.md, DATABASE.md, PRD.md, docs/DECISION_FLOW.md
 
 ---
 
@@ -25,61 +25,66 @@
 
 ## 0. 전체 에이전트 파이프라인
 
+> **현행 파이프라인 (2026-06-12):** 결정적 DecisionEngine이 TradeCandidate를 생성하고, GPT-5 ReviewerAgent가 APPROVE/REJECT 검토만 수행한다. AI는 진입가·손절가·목표가·레버리지를 생성하거나 변경하지 않는다.
+
 ### 0.1 시스템 전체 흐름
 
 ```mermaid
 graph TD
     subgraph CONTINUOUS["상시 실행 (Event-Driven)"]
-        MDA["1. Market Data Agent\nBinance WebSocket\n실시간 OHLCV 수집"]
+        MDA["1. Market Data Agent\nBinance WebSocket\n실시간 OHLCV / OI / Funding / Spread"]
     end
 
     subgraph PERIODIC["5분 주기 (Celery Beat)"]
-        TAA["2. Technical Analysis\nAgent\nRSI/MACD/BB/EMA"]
-        SEN["3. Sentiment\nAgent\nFinBERT / Fear&Greed"]
-        MSA["4. Market Structure\nAgent\nOI / Funding / L/S"]
-        SYN["5. Synthesis\nAgent\nClaude Sonnet"]
-        RSK["6. Risk\nAgent\n포지션 사이징"]
+        TAA["2. Technical Analysis\nAgent\nRSI/MACD/BB/EMA/ATR/Volume\n→ TechnicalResult"]
+        STE["3. Strategy Engine\nSignalScore\n(long/short/no_trade/risk)"]
+        DEC["4. Decision Engine (결정적)\n① classify_market_regime\n② score_chart_signals\n③ score_news_sentiment\n④ score_derivatives_market\n⑤ select_strategy_type\n⑥ generate_trade_candidate\n→ TradeCandidate"]
+        REV["5. Reviewer Agent (GPT-5)\nAPPROVE / REJECT only\n(숫자 변경 불가)"]
+        RSK["6. RiskEngine.validate_candidate\nFinal Safety Gate\nSL / R:R≥2.0 / 손실 한도"]
+        FIN["7. decide_final_action\nFinalDecision: LONG/SHORT/HOLD"]
     end
 
     subgraph REACTIVE["이벤트 반응 (Redis Streams)"]
-        EXE["7. Execution\nAgent\nBinance 주문 실행"]
+        EXE["8–10. Portfolio → PM → Execution\nBinance 실주문 또는 Shadow(paper)"]
     end
 
     subgraph POST_TRADE["거래 완료 후 (Post-MVP)"]
-        JRN["8. Journal\nAgent\nAI 거래일지 생성"]
-        REF["9. Reflection\nAgent\n주간 습관 분석"]
+        JRN["Journal Agent\nAI 거래일지 생성"]
+        REF["Reflection Agent\n주간 습관 분석"]
     end
 
     MDA -->|OHLCV → TimescaleDB| TAA
-    MDA -->|가격 → Redis| MSA
-
-    TAA -->|tech_score| SYN
-    SEN -->|sentiment_score| SYN
-    MSA -->|market_score| SYN
-
-    TAA -.->|병렬 실행| SEN
-    SEN -.->|병렬 실행| MSA
-
-    SYN -->|raw signal| RSK
-    RSK -->|approved signal| EXE
-
+    MDA -->|가격·파생 → Redis| DEC
+    TAA -->|TechnicalResult| STE
+    STE -->|SignalScore| DEC
+    DEC -->|TradeCandidate| REV
+    REV -->|AIReviewResult| RSK
+    RSK -->|ValidationResult| FIN
+    FIN -->|LONG or SHORT| EXE
+    FIN -->|HOLD| DROP["결정 로그 기록 → HOLD"]
     EXE -->|position closed| JRN
     JRN -->|주간 배치| REF
 ```
 
 ### 0.2 에이전트 요약 테이블
 
-| # | Agent | 실행 방식 | 주기 | LLM 사용 | MVP 여부 |
-|---|-------|---------|------|---------|---------|
-| 1 | Market Data | 상시 (WebSocket) | 실시간 | ✗ | ✅ |
-| 2 | Technical Analysis | 주기적 (Celery) | 5분 | ✗ | ✅ |
-| 3 | Sentiment | 주기적 (Celery) | 5분 | ✗ (FinBERT) | ✅ |
-| 4 | Market Structure | 주기적 (Celery) | 5분 | ✗ | ✅ |
-| 5 | Synthesis | 주기적 (Celery) | 5분 | ✅ Claude Sonnet | ✅ |
-| 6 | Risk | 이벤트 (Redis) | 즉시 | ✗ | ✅ |
-| 7 | Execution | 이벤트 (Redis) | 즉시 | ✗ | ✅ |
-| 8 | Journal | 이벤트 (포지션 종료) | 즉시 | ✅ Claude Sonnet | Post-MVP |
-| 9 | Reflection | 배치 (Celery Beat) | 주 1회 | ✅ Claude Sonnet | Post-MVP |
+| # | Component | 실행 방식 | 주기 | LLM 사용 | 역할 |
+|---|---|---|---|---|---|
+| 1 | Market Data Agent | 상시 (WebSocket) | 실시간 | ✗ | OHLCV / OI / Funding 수집 |
+| 2 | Technical Analysis Agent | 주기적 (Celery) | 5분 | ✗ | 기술 지표 계산 → TechnicalResult |
+| 3 | Strategy Engine | 주기적 | 5분 | ✗ | SignalScore 생성 |
+| 4 | **DecisionEngine** | 주기적 | 5분 | ✗ | **TradeCandidate 결정적 생성** |
+| 5 | **ReviewerAgent** | 주기적 | 5분 | ✅ GPT-5 | **APPROVE / REJECT 검토 전용** |
+| 6 | **RiskEngine** | 이벤트 | 즉시 | ✗ | **최종 안전 게이트** |
+| 7 | FinalDecision | 이벤트 | 즉시 | ✗ | LONG / SHORT / HOLD 결정 |
+| 8 | Portfolio / PM / Execution | 이벤트 | 즉시 | ✗ | 실주문 또는 Shadow 기록 |
+| — | Journal Agent | 이벤트 | 즉시 | ✅ | AI 거래일지 (Post-MVP) |
+| — | Reflection Agent | 배치 | 주 1회 | ✅ | 주간 분석 (Post-MVP) |
+| — | ~~AnalystAgent~~ | **DEPRECATED** | — | ~~GPT~~ | 구 경로. 프로덕션 미사용. |
+
+> **AnalystAgent (`agents/analyst/`):** AI가 직접 시그널을 생성하던 구 경로. `agents/decision/` + `agents/synthesis/`로 대체됨. `OpenAIClient`만 `ReviewerAgent`가 재사용 중이며 향후 이전 예정.
+
+상세 구현 및 FinalDecision 조건은 [`docs/DECISION_FLOW.md`](docs/DECISION_FLOW.md) 참조.
 
 ---
 
