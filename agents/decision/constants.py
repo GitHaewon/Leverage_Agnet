@@ -157,6 +157,38 @@ TECH_SCORE_RANGE_THRESHOLD: float = 0.20  # |tech_score| < 0.20 → 횡보 신�
 # 최소 신호 합의 수: 이 값 이상 동시 만족해야 해당 국면으로 분류
 REGIME_MIN_SIGNALS: int = 2
 
+# ── 전략 선택 임계값 ─────────────────────────────────────────────────────────────
+# select_strategy_type() 에서 사용. config dict 로 런타임 오버라이드 가능.
+
+# 통합 리스크 = chart_risk*0.4 + news_risk*0.3 + deriv_risk*0.3
+
+# TREND_FOLLOWING 선택 기준
+STRATEGY_MIN_TREND_DIR_SCORE: float     = 55.0  # 방향 점수(long or short) 최소값
+STRATEGY_MAX_RISK_FOR_TREND: float      = 55.0  # 통합 리스크 상한
+
+# BREAKOUT 선택 기준
+STRATEGY_MIN_BREAKOUT_VOL_RATIO: float  = 1.8   # 거래량 급증 배율 최소값
+STRATEGY_MAX_BREAKOUT_PRICE_MOVE: float = 3.0   # 이미 이동한 가격 최대 % (기회 소멸)
+STRATEGY_MAX_RISK_FOR_BREAKOUT: float   = 50.0  # 통합 리스크 상한
+
+# INTRADAY 선택 기준
+STRATEGY_MIN_INTRADAY_DIR_SCORE: float  = 35.0  # 방향 점수 최소값
+STRATEGY_MAX_RISK_FOR_INTRADAY: float   = 60.0  # 통합 리스크 상한
+
+# SCALPING 선택 기준
+STRATEGY_MIN_SCALPING_DIR_SCORE: float  = 20.0  # 방향 점수 최소값
+STRATEGY_MAX_RISK_FOR_SCALPING: float   = 40.0  # 통합 리스크 상한
+
+# 전략별 예상 보유 시간 (분, 구간 중앙값)
+STRATEGY_HOLDING_MINUTES: dict[str, int] = {
+    "SCALPING":        5,
+    "INTRADAY":        30,
+    "TREND_FOLLOWING": 120,
+    "BREAKOUT":        60,
+    "UNKNOWN":         0,
+}
+
+
 # ── 주문 실행 규칙 ─────────────────────────────────────────────────────────────
 # CLAUDE.md 절대 규칙과 1:1 대응. 이 값을 False 로 변경하려면 CTO 승인 필요.
 

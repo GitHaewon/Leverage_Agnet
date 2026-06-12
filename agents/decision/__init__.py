@@ -23,6 +23,7 @@ from agents.decision.regime import classify_market_regime
 from agents.decision.chart_signals import score_chart_signals
 from agents.decision.news_sentiment import score_news_sentiment
 from agents.decision.derivatives_market import score_derivatives_market
+from agents.decision.strategy_selector import select_strategy_type
 from agents.decision.constants import (
     # Risk 사전 필터
     DECISION_MAX_LEVERAGE,
@@ -57,6 +58,17 @@ from agents.decision.constants import (
     BLOCK_AFTER_FUNDING_MINUTES,
     HIGH_VOLATILITY_BLOCK,
     NEWS_EVENT_BLOCK,
+    # 전략 선택 임계값
+    STRATEGY_MIN_TREND_DIR_SCORE,
+    STRATEGY_MAX_RISK_FOR_TREND,
+    STRATEGY_MIN_BREAKOUT_VOL_RATIO,
+    STRATEGY_MAX_BREAKOUT_PRICE_MOVE,
+    STRATEGY_MAX_RISK_FOR_BREAKOUT,
+    STRATEGY_MIN_INTRADAY_DIR_SCORE,
+    STRATEGY_MAX_RISK_FOR_INTRADAY,
+    STRATEGY_MIN_SCALPING_DIR_SCORE,
+    STRATEGY_MAX_RISK_FOR_SCALPING,
+    STRATEGY_HOLDING_MINUTES,
     # 실행 규칙
     REQUIRE_STOP_LOSS,
     REQUIRE_TAKE_PROFIT,
@@ -71,6 +83,7 @@ __all__ = [
     "score_chart_signals",
     "score_news_sentiment",
     "score_derivatives_market",
+    "select_strategy_type",
     # 모델
     "AIReviewAction",
     "AIReviewResult",
@@ -118,6 +131,17 @@ __all__ = [
     "BLOCK_AFTER_FUNDING_MINUTES",
     "HIGH_VOLATILITY_BLOCK",
     "NEWS_EVENT_BLOCK",
+    # 상수 — 전략 선택
+    "STRATEGY_MIN_TREND_DIR_SCORE",
+    "STRATEGY_MAX_RISK_FOR_TREND",
+    "STRATEGY_MIN_BREAKOUT_VOL_RATIO",
+    "STRATEGY_MAX_BREAKOUT_PRICE_MOVE",
+    "STRATEGY_MAX_RISK_FOR_BREAKOUT",
+    "STRATEGY_MIN_INTRADAY_DIR_SCORE",
+    "STRATEGY_MAX_RISK_FOR_INTRADAY",
+    "STRATEGY_MIN_SCALPING_DIR_SCORE",
+    "STRATEGY_MAX_RISK_FOR_SCALPING",
+    "STRATEGY_HOLDING_MINUTES",
     # 상수 — 실행 규칙
     "REQUIRE_STOP_LOSS",
     "REQUIRE_TAKE_PROFIT",
