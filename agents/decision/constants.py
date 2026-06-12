@@ -116,6 +116,29 @@ HIGH_VOLATILITY_BLOCK: bool       = True  # 고변동성 국면 신규 진입 �
 NEWS_EVENT_BLOCK: bool            = True  # 뉴스 이벤트 국면 신규 진입 차단
 
 
+# ── 뉴스·감성 점수 임계값 ─────────────────────────────────────────────────────
+# score_news_sentiment() 에서 사용. config dict 로 런타임 오버라이드 가능.
+
+# Fear & Greed 구간 기준 (0-100 인덱스)
+FEAR_GREED_EXTREME_GREED: int = 75   # ≥ 75 → Extreme Greed (롱 추격 위험)
+FEAR_GREED_GREED: int         = 56   # ≥ 56 → Greed 구간
+FEAR_GREED_FEAR: int          = 44   # ≤ 44 → Fear 구간
+FEAR_GREED_EXTREME_FEAR: int  = 25   # ≤ 25 → Extreme Fear (기술적 확인 필수)
+
+# 주요 이벤트 감지 — |뉴스 종합 점수| 가 이 값 이상이면 no_trade_flag = True
+MAJOR_EVENT_NEWS_THRESHOLD: float = 0.80
+
+# 리스크 점수 가산치
+EXTREME_GREED_RISK_BONUS: float  = 20.0   # Extreme Greed → 리스크 증가
+EXTREME_FEAR_RISK_BONUS: float   = 10.0   # Extreme Fear → 리스크 증가
+HIGH_VOL_NEWS_RISK_BONUS: float  = 25.0   # HIGH_VOLATILITY 국면 → 감성 리스크 증가
+NEWS_EVENT_RISK_BONUS: float     = 35.0   # NEWS_EVENT 국면 → 감성 리스크 증가
+
+# 뉴스 방향 점수 조정 상한
+# 뉴스가 long_score / short_score 에 직접 가할 수 있는 최대 조정치
+# 낮게 유지해야 '뉴스 = 트리거'가 되지 않음
+NEWS_MAX_SCORE_ADJUSTMENT: float = 15.0
+
 # ── 시장 국면 분류 임계값 ─────────────────────────────────────────────────────
 # classify_market_regime() 에서 사용. config dict 로 런타임 오버라이드 가능.
 

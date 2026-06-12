@@ -11,6 +11,7 @@ from agents.decision.models import (
     FinalDecision,
     MarketRegime,
     MarketRegimeResult,
+    NewsSentimentScore,
     RiskCheckResult,
     SignalScore,
     StrategySelectionResult,
@@ -19,6 +20,7 @@ from agents.decision.models import (
 )
 from agents.decision.regime import classify_market_regime
 from agents.decision.chart_signals import score_chart_signals
+from agents.decision.news_sentiment import score_news_sentiment
 from agents.decision.constants import (
     # Risk 사전 필터
     DECISION_MAX_LEVERAGE,
@@ -62,9 +64,10 @@ from agents.decision.constants import (
 )
 
 __all__ = [
-    # 분류 함수
+    # 분류·점수 함수
     "classify_market_regime",
     "score_chart_signals",
+    "score_news_sentiment",
     # 모델
     "AIReviewAction",
     "AIReviewResult",
@@ -72,6 +75,7 @@ __all__ = [
     "FinalDecision",
     "MarketRegime",
     "MarketRegimeResult",
+    "NewsSentimentScore",
     "RiskCheckResult",
     "SignalScore",
     "StrategySelectionResult",

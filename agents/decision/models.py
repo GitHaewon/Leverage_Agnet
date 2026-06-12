@@ -201,6 +201,43 @@ class RiskCheckResult:
 
 
 @dataclass
+class NewsSentimentScore:
+    """
+    뉴스·감성 분석 점수 결과.
+
+    역할: 직접 거래 트리거가 아닌 리스크 필터.
+      - Positive news → long_score_adjustment 소폭 증가 (LONG 강제 아님)
+      - Negative news → short_score_adjustment 소폭 증가 (SHORT 강제 아님)
+      - 주요 이벤트 / 극단적 탐욕·공포 → risk_score 증가 + no_trade_flag 가능
+
+    sentiment_score  : -100 ~ +100 (뉴스 + F&G 역발상 종합)
+    long_score_adjustment  : 상위 레이어 long_score 에 가산할 조정치
+    short_score_adjustment : 상위 레이어 short_score 에 가산할 조정치
+    risk_score       : 0 ~ 100 (높을수록 진입 위험)
+    no_trade_flag    : True 이면 진입 금지 (주요 이벤트 또는 NEWS_EVENT 국면)
+    reasons          : 결정 근거 문자열 목록
+    """
+    sentiment_score:         float
+    long_score_adjustment:   float
+    short_score_adjustment:  float
+    risk_score:              float
+    no_trade_flag:           bool
+    reasons:                 list[str] = field(default_factory=list)
+
+    @classmethod
+    def neutral(cls) -> "NewsSentimentScore":
+        """데이터 없음 또는 오류 시 안전한 중립 결과."""
+        return cls(
+            sentiment_score=0.0,
+            long_score_adjustment=0.0,
+            short_score_adjustment=0.0,
+            risk_score=0.0,
+            no_trade_flag=False,
+            reasons=["뉴스·감성 데이터 없음 — 중립 처리"],
+        )
+
+
+@dataclass
 class FinalDecision:
     """
     파이프라인 최종 의사결정 컨테이너.
