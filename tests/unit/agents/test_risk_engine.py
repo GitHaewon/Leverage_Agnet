@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agents.decision.models import FinalAction, StrategyType, TradeCandidate
 from agents.risk.engine import RiskEngine
 from agents.risk.models import (
     AccountState,
@@ -19,6 +20,8 @@ from agents.risk.models import (
     UserContext,
     ValidationResult,
 )
+
+pytestmark = pytest.mark.asyncio
 
 
 def _make_signal(**kwargs) -> RawSignal:
@@ -41,7 +44,7 @@ def _make_ctx(**kwargs) -> UserContext:
         user_id=uuid.uuid4(),
         plan="pro",
         risk_profile="moderate",
-        risk_per_trade=0.02,
+        risk_per_trade=0.005,
         max_leverage=10,
         max_concurrent_positions=5,
         daily_loss_limit_pct=0.03,
@@ -63,6 +66,36 @@ def _make_account(**kwargs) -> AccountState:
     )
     defaults.update(kwargs)
     return AccountState(**defaults)
+
+
+def _make_candidate(**kwargs) -> TradeCandidate:
+    defaults = dict(
+        action=FinalAction.LONG,
+        coin="BTC",
+        symbol="BTCUSDT",
+        strategy_type=StrategyType.INTRADAY,
+        expected_holding_minutes=30,
+        entry_price=Decimal("100"),
+        stop_loss=Decimal("95"),
+        take_profit=Decimal("110"),
+        leverage=5,
+        margin_ratio=0.02,
+        notional_size=Decimal("1000"),
+        actual_rr=2.0,
+        min_required_rr=1.5,
+        expected_gross_profit=Decimal("100"),
+        expected_gross_loss=Decimal("50"),
+        expected_fees=Decimal("1"),
+        expected_slippage_cost=Decimal("0.60"),
+        expected_net_profit=Decimal("98.40"),
+        expected_net_loss=Decimal("51.60"),
+        liquidation_price=Decimal("80"),
+        spread_bps=1.0,
+        slippage_bps=1.0,
+        reasons=[],
+    )
+    defaults.update(kwargs)
+    return TradeCandidate(**defaults)
 
 
 @pytest.fixture
@@ -118,7 +151,7 @@ class TestFullPipelineApproval:
         assert result.approved is True
         # Pro 플랜 max 10x, 사용자 max 10x → 10x
         assert result.final_leverage == 10
-        assert "LEVERAGE_CAPPED" in (result.warnings or [])
+        assert any("LEVERAGE_CAPPED" in w for w in (result.warnings or []))
 
 
 # ════════════════════════════════════════════════════════════════
@@ -405,3 +438,176 @@ class TestSystemError:
         )
         assert result.approved is False
         assert result.rejection_code == "SYSTEM_ERROR"
+
+
+# ════════════════════════════════════════════════════════════════
+# Deterministic TradeCandidate 검증 테스트
+# ════════════════════════════════════════════════════════════════
+
+class TestTradeCandidateRiskChecks:
+    async def _validate(
+        self,
+        engine: RiskEngine,
+        candidate: TradeCandidate,
+        *,
+        ctx: UserContext | None = None,
+        account: AccountState | None = None,
+        config: dict | None = None,
+    ) -> ValidationResult:
+        return await engine.validate_candidate(
+            candidate=candidate,
+            ctx=ctx or _make_ctx(risk_per_trade=0.02),
+            account=account or _make_account(),
+            daily_loss_usdt=Decimal("0"),
+            weekly_loss_usdt=Decimal("0"),
+            weekly_limit_usdt=Decimal("1000"),
+            consecutive_losses=0,
+            open_positions_count=0,
+            same_coin_position=None,
+            config=config,
+        )
+
+    async def test_unknown_strategy_is_rejected(self, engine: RiskEngine) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(strategy_type=StrategyType.UNKNOWN),
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "UNKNOWN_STRATEGY"
+        assert "UNKNOWN_STRATEGY" in result.failed_checks
+
+    async def test_rr_below_strategy_min_required_rr_is_rejected(
+        self,
+        engine: RiskEngine,
+    ) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(actual_rr=1.4, min_required_rr=1.5),
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "STRATEGY_RR"
+
+    async def test_rr_below_global_minimum_is_rejected(self, engine: RiskEngine) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(
+                strategy_type=StrategyType.SCALPING,
+                expected_holding_minutes=5,
+                actual_rr=1.3,
+                min_required_rr=1.0,
+                spread_bps=1.0,
+            ),
+            config={"global_min_risk_reward_ratio": 1.5},
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "ORDER_004"
+
+    async def test_expected_net_profit_threshold_is_rejected(
+        self,
+        engine: RiskEngine,
+    ) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(expected_net_profit=Decimal("0.50")),
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "EXPECTED_PROFIT"
+
+    async def test_spread_too_high_is_rejected(self, engine: RiskEngine) -> None:
+        result = await self._validate(engine, _make_candidate(spread_bps=6.0))
+
+        assert result.approved is False
+        assert result.rejection_code == "SPREAD_LIMIT"
+
+    async def test_slippage_too_high_is_rejected(self, engine: RiskEngine) -> None:
+        result = await self._validate(engine, _make_candidate(slippage_bps=4.0))
+
+        assert result.approved is False
+        assert result.rejection_code == "SLIPPAGE_LIMIT"
+
+    async def test_liquidation_price_too_close_to_stop_loss_is_rejected(
+        self,
+        engine: RiskEngine,
+    ) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(liquidation_price=Decimal("94.95")),
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "LIQUIDATION_DISTANCE"
+
+    async def test_leverage_above_max_is_rejected(self, engine: RiskEngine) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(leverage=7),
+            config={"max_leverage": 6},
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "LEVERAGE_LIMIT"
+
+    async def test_margin_ratio_above_max_is_rejected(self, engine: RiskEngine) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(margin_ratio=0.04),
+            config={"max_entry_margin_ratio": 0.03},
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "MARGIN_RATIO_LIMIT"
+
+    async def test_expected_holding_minutes_above_strategy_max_is_rejected(
+        self,
+        engine: RiskEngine,
+    ) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(expected_holding_minutes=61),
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "HOLDING_TIME"
+
+    async def test_cross_margin_is_rejected(self, engine: RiskEngine) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(),
+            config={"margin_mode": "cross"},
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "MARGIN_MODE"
+
+    async def test_martingale_enabled_is_rejected(self, engine: RiskEngine) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(),
+            config={"allow_martingale": True},
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "MARTINGALE_DISABLED"
+
+    async def test_averaging_down_enabled_is_rejected(self, engine: RiskEngine) -> None:
+        result = await self._validate(
+            engine,
+            _make_candidate(),
+            config={"allow_averaging_down": True},
+        )
+
+        assert result.approved is False
+        assert result.rejection_code == "AVERAGING_DOWN_DISABLED"
+
+    async def test_valid_candidate_passes_all_checks(self, engine: RiskEngine) -> None:
+        result = await self._validate(engine, _make_candidate())
+
+        assert result.approved is True
+        assert result.failed_checks == []
+        assert result.expected_net_profit == Decimal("98.40")
+        assert result.expected_net_loss == Decimal("51.60")
+        assert result.risk_per_trade_pct == 0.02

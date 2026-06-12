@@ -31,6 +31,29 @@ from decimal import Decimal
 
 import redis.asyncio as aioredis
 
+from agents.decision.constants import (
+    ALLOW_AVERAGING_DOWN,
+    ALLOW_MARTINGALE,
+    BLOCK_AFTER_FUNDING_MINUTES,
+    BLOCK_BEFORE_FUNDING_MINUTES,
+    DECISION_MAX_ENTRY_MARGIN_RATIO,
+    DECISION_MAX_LEVERAGE,
+    DECISION_MAX_SLIPPAGE_BPS,
+    GLOBAL_MIN_RISK_REWARD_RATIO,
+    HIGH_VOLATILITY_BLOCK,
+    ISOLATED_MARGIN_ONLY,
+    MIN_EXPECTED_NET_PROFIT_PCT,
+    MARGIN_MODE,
+    NEWS_EVENT_BLOCK,
+    STRATEGY_THRESHOLDS,
+)
+from agents.decision.models import (
+    FinalAction,
+    MarketRegime,
+    MarketRegimeResult,
+    StrategyType,
+    TradeCandidate,
+)
 from agents.risk.constants import (
     DAILY_LOSS_LIMIT_DEFAULTS,
     WEEKLY_LOSS_LIMIT_DEFAULTS,
@@ -66,6 +89,58 @@ from agents.risk.validators import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _cfg(config: object | None, key: str, default: object) -> object:
+    if config is None:
+        return default
+    if isinstance(config, dict):
+        decision = config.get("decision")
+        if isinstance(decision, dict) and key in decision:
+            return decision[key]
+        return config.get(key, default)
+    decision = getattr(config, "decision", None)
+    if decision is not None and hasattr(decision, key):
+        return getattr(decision, key)
+    return getattr(config, key, default)
+
+
+def _as_regime(value: object | None) -> MarketRegime:
+    if isinstance(value, MarketRegimeResult):
+        return value.regime
+    if isinstance(value, MarketRegime):
+        return value
+    if value is None:
+        return MarketRegime.UNKNOWN
+    try:
+        return MarketRegime(str(value))
+    except ValueError:
+        return MarketRegime.UNKNOWN
+
+
+def _candidate_direction(candidate: TradeCandidate) -> str:
+    return "LONG" if candidate.action == FinalAction.LONG else "SHORT"
+
+
+def _reject_candidate(
+    code: str,
+    reason: str,
+    failed: list[str],
+    warnings: list[str],
+    candidate: TradeCandidate,
+    ctx: UserContext,
+) -> ValidationResult:
+    failed.append(code)
+    return ValidationResult(
+        approved=False,
+        rejection_code=code,
+        rejection_reason=reason,
+        warnings=warnings,
+        failed_checks=failed.copy(),
+        risk_per_trade_pct=ctx.risk_per_trade,
+        expected_net_profit=candidate.expected_net_profit,
+        expected_net_loss=candidate.expected_net_loss,
+    )
 
 
 class RiskEngine:
@@ -258,6 +333,430 @@ class RiskEngine:
             # 예외 발생 시 항상 거부 (안전 우선)
             logger.error(
                 "Risk validation SYSTEM_ERROR user_id=%s error=%s",
+                ctx.user_id, exc, exc_info=True,
+            )
+            return ValidationResult.system_error(type(exc).__name__)
+
+    async def validate_candidate(
+        self,
+        candidate: TradeCandidate,
+        ctx: UserContext,
+        account: AccountState,
+        daily_loss_usdt: Decimal,
+        weekly_loss_usdt: Decimal,
+        weekly_limit_usdt: Decimal,
+        consecutive_losses: int,
+        open_positions_count: int,
+        same_coin_position: OpenPosition | None,
+        market_regime: object | None = None,
+        funding_context: object | None = None,
+        config: object | None = None,
+    ) -> ValidationResult:
+        """
+        Deterministic TradeCandidate 검증 파이프라인.
+
+        Legacy RawSignal 검증과 달리 confidence 기반 판단이나 재사이징을 하지
+        않는다.
+        TradeCandidate가 이미 계산한 손익·비용·R:R 값을 엄격히 검증한다.
+        """
+        warnings: list[str] = []
+        failed: list[str] = []
+
+        try:
+            ok, reason = await check_kill_switch(ctx.user_id, self._redis)
+            if not ok:
+                return _reject_candidate(
+                    "KILL_SWITCH", reason, failed, warnings, candidate, ctx
+                )
+
+            ok, reason = check_trading_active(ctx)
+            if not ok:
+                return _reject_candidate(
+                    "TRADING_INACTIVE", reason, failed, warnings, candidate, ctx
+                )
+
+            if candidate.action not in (FinalAction.LONG, FinalAction.SHORT):
+                return _reject_candidate(
+                    "HOLD",
+                    "candidate.action이 LONG/SHORT가 아닙니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            if candidate.stop_loss is None or candidate.stop_loss <= 0:
+                return _reject_candidate(
+                    "ORDER_003",
+                    "ORDER_003: 손절가(stop_loss)가 없습니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            if candidate.take_profit is None or candidate.take_profit <= 0:
+                return _reject_candidate(
+                    "TAKE_PROFIT_MISSING",
+                    "목표가(take_profit)가 없습니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            if candidate.strategy_type == StrategyType.UNKNOWN:
+                return _reject_candidate(
+                    "UNKNOWN_STRATEGY",
+                    "strategy_type=UNKNOWN 후보는 실행할 수 없습니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            strategy_key = candidate.strategy_type.value
+            strategy_threshold = STRATEGY_THRESHOLDS.get(strategy_key)
+            strategy_min_rr = max(
+                float(candidate.min_required_rr),
+                strategy_threshold.min_risk_reward_ratio if strategy_threshold else 0.0,
+            )
+            global_min_rr = float(_cfg(
+                config,
+                "global_min_risk_reward_ratio",
+                GLOBAL_MIN_RISK_REWARD_RATIO,
+            ))
+
+            if candidate.actual_rr < strategy_min_rr:
+                return _reject_candidate(
+                    "STRATEGY_RR",
+                    f"R:R {candidate.actual_rr:.2f} < 전략 최소 {strategy_min_rr:.2f}",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            if candidate.actual_rr < global_min_rr:
+                return _reject_candidate(
+                    "ORDER_004",
+                    f"R:R {candidate.actual_rr:.2f} < 전역 최소 {global_min_rr:.2f}",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            max_leverage = min(
+                int(_cfg(config, "max_leverage", DECISION_MAX_LEVERAGE)),
+                ctx.max_leverage,
+            )
+            if candidate.leverage > max_leverage:
+                return _reject_candidate(
+                    "LEVERAGE_LIMIT",
+                    f"레버리지 {candidate.leverage}x > 허용 {max_leverage}x",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            max_margin_ratio = float(_cfg(
+                config,
+                "max_entry_margin_ratio",
+                DECISION_MAX_ENTRY_MARGIN_RATIO,
+            ))
+            if candidate.margin_ratio > max_margin_ratio:
+                return _reject_candidate(
+                    "MARGIN_RATIO_LIMIT",
+                    f"margin_ratio {candidate.margin_ratio:.2%} > 허용 {max_margin_ratio:.2%}",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            projected_loss = candidate.expected_net_loss
+            if projected_loss is None:
+                projected_loss = account.total_balance * Decimal(str(ctx.risk_per_trade))
+
+            daily_limit_usdt = account.total_balance * Decimal(str(ctx.daily_loss_limit_pct))
+            ok, reason, warn_level = check_daily_loss_limit(
+                daily_loss_usdt,
+                daily_limit_usdt,
+                projected_loss,
+            )
+            if warn_level:
+                warnings.append(
+                    f"DAILY_LOSS_{warn_level.upper()}: 일일 손실 한도 {warn_level}"
+                )
+            if not ok:
+                await self._kill_switch.halt_trading(
+                    ctx.user_id,
+                    HaltTrigger.DAILY_LOSS_LIMIT,
+                    f"일일 손실 ${daily_loss_usdt:.2f} / 한도 ${daily_limit_usdt:.2f}",
+                )
+                return _reject_candidate("ORDER_001", reason, failed, warnings, candidate, ctx)
+
+            ok, reason = check_weekly_loss_limit(weekly_loss_usdt, weekly_limit_usdt)
+            if not ok:
+                await self._kill_switch.halt_trading(
+                    ctx.user_id,
+                    HaltTrigger.WEEKLY_LOSS_LIMIT,
+                    f"주간 손실 ${weekly_loss_usdt:.2f} / 한도 ${weekly_limit_usdt:.2f}",
+                )
+                return _reject_candidate("WEEKLY_LOSS", reason, failed, warnings, candidate, ctx)
+
+            ok, reason = await check_consecutive_losses(
+                ctx.user_id,
+                consecutive_losses,
+                self._redis,
+            )
+            if not ok:
+                if consecutive_losses >= 5:
+                    await self._kill_switch.halt_trading(
+                        ctx.user_id,
+                        HaltTrigger.CONSECUTIVE_LOSSES,
+                        f"{consecutive_losses}연속 손실",
+                    )
+                return _reject_candidate("CONSEC_LOSS", reason, failed, warnings, candidate, ctx)
+
+            ok, reason = check_position_count_limit(open_positions_count, ctx)
+            if not ok and same_coin_position is None:
+                return _reject_candidate("ORDER_002", reason, failed, warnings, candidate, ctx)
+
+            if same_coin_position is not None:
+                return _reject_candidate(
+                    "POSITION_CONFLICT",
+                    f"{candidate.coin} 기존 포지션이 있어 신규 후보를 거부합니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            min_profit_pct = Decimal(str(_cfg(
+                config,
+                "min_expected_net_profit_pct",
+                MIN_EXPECTED_NET_PROFIT_PCT,
+            )))
+            min_profit = candidate.notional_size * min_profit_pct
+            if candidate.expected_net_profit is None or candidate.expected_net_profit <= min_profit:
+                return _reject_candidate(
+                    "EXPECTED_PROFIT",
+                    f"expected_net_profit {candidate.expected_net_profit} <= 최소 {min_profit}",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            max_loss_allowed = account.total_balance * Decimal(str(ctx.risk_per_trade))
+            if (
+                candidate.expected_net_loss is None
+                or candidate.expected_net_loss > max_loss_allowed
+            ):
+                return _reject_candidate(
+                    "EXPECTED_LOSS",
+                    f"expected_net_loss {candidate.expected_net_loss} "
+                    f"> 계좌 리스크 한도 {max_loss_allowed}",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            if candidate.liquidation_price is None:
+                return _reject_candidate(
+                    "LIQUIDATION_PRICE",
+                    "liquidation_price가 없어 청산 리스크를 검증할 수 없습니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            liq_buffer = Decimal(str(_cfg(config, "min_liq_stop_buffer_pct", 0.001)))
+            if candidate.action == FinalAction.LONG:
+                max_safe_liq = candidate.stop_loss * (Decimal("1") - liq_buffer)
+                liq_safe = candidate.liquidation_price < max_safe_liq
+            else:
+                min_safe_liq = candidate.stop_loss * (Decimal("1") + liq_buffer)
+                liq_safe = candidate.liquidation_price > min_safe_liq
+            if not liq_safe:
+                return _reject_candidate(
+                    "LIQUIDATION_DISTANCE",
+                    "청산가가 stop_loss와 충분히 떨어져 있지 않습니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            if strategy_threshold and candidate.spread_bps > strategy_threshold.max_spread_bps:
+                return _reject_candidate(
+                    "SPREAD_LIMIT",
+                    f"spread_bps {candidate.spread_bps:.2f} "
+                    f"> 전략 한도 {strategy_threshold.max_spread_bps:.2f}",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            max_slippage = float(_cfg(config, "max_slippage_bps", DECISION_MAX_SLIPPAGE_BPS))
+            if candidate.slippage_bps > max_slippage:
+                return _reject_candidate(
+                    "SLIPPAGE_LIMIT",
+                    f"slippage_bps {candidate.slippage_bps:.2f} > 허용 {max_slippage:.2f}",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            minutes_to_funding = None
+            if funding_context is not None:
+                if isinstance(funding_context, dict):
+                    minutes_to_funding = funding_context.get("minutes_to_funding")
+                    is_funding_window = bool(funding_context.get("is_funding_window", False))
+                else:
+                    minutes_to_funding = getattr(funding_context, "minutes_to_funding", None)
+                    is_funding_window = bool(getattr(funding_context, "is_funding_window", False))
+                before = int(_cfg(
+                    config,
+                    "block_before_funding_minutes",
+                    BLOCK_BEFORE_FUNDING_MINUTES,
+                ))
+                after = int(_cfg(
+                    config,
+                    "block_after_funding_minutes",
+                    BLOCK_AFTER_FUNDING_MINUTES,
+                ))
+                if is_funding_window or (
+                    minutes_to_funding is not None and -after <= float(minutes_to_funding) <= before
+                ):
+                    return _reject_candidate(
+                        "FUNDING_WINDOW",
+                        "펀딩 시간 필터에 의해 신규 진입이 차단되었습니다",
+                        failed,
+                        warnings,
+                        candidate,
+                        ctx,
+                    )
+
+            regime = _as_regime(market_regime)
+            if regime == MarketRegime.HIGH_VOLATILITY and bool(_cfg(
+                config,
+                "high_volatility_block",
+                HIGH_VOLATILITY_BLOCK,
+            )):
+                return _reject_candidate(
+                    "HIGH_VOLATILITY",
+                    "HIGH_VOLATILITY 국면에서는 신규 진입을 차단합니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+            if regime == MarketRegime.NEWS_EVENT and bool(_cfg(
+                config,
+                "news_event_block",
+                NEWS_EVENT_BLOCK,
+            )):
+                return _reject_candidate(
+                    "NEWS_EVENT",
+                    "NEWS_EVENT 국면에서는 신규 진입을 차단합니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            if candidate.expected_holding_minutes <= 0:
+                return _reject_candidate(
+                    "HOLDING_TIME",
+                    "expected_holding_minutes가 정의되지 않았습니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+            if (
+                strategy_threshold
+                and candidate.expected_holding_minutes > strategy_threshold.max_holding_minutes
+            ):
+                return _reject_candidate(
+                    "HOLDING_TIME",
+                    f"expected_holding_minutes {candidate.expected_holding_minutes} "
+                    f"> 전략 최대 {strategy_threshold.max_holding_minutes}",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            if bool(_cfg(config, "allow_martingale", ALLOW_MARTINGALE)):
+                return _reject_candidate(
+                    "MARTINGALE_DISABLED",
+                    "마틴게일은 허용되지 않습니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+            if bool(_cfg(config, "allow_averaging_down", ALLOW_AVERAGING_DOWN)):
+                return _reject_candidate(
+                    "AVERAGING_DOWN_DISABLED",
+                    "물타기는 허용되지 않습니다",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            margin_mode = str(_cfg(config, "margin_mode", MARGIN_MODE)).lower()
+            if margin_mode != "isolated" or not ISOLATED_MARGIN_ONLY:
+                return _reject_candidate(
+                    "MARGIN_MODE",
+                    "Cross margin은 허용되지 않습니다 — isolated만 허용",
+                    failed,
+                    warnings,
+                    candidate,
+                    ctx,
+                )
+
+            ok, reason = check_portfolio_risk(
+                account,
+                candidate.expected_net_loss or Decimal("0"),
+                ctx.risk_profile,
+            )
+            if not ok:
+                return _reject_candidate("PORTFOLIO_RISK", reason, failed, warnings, candidate, ctx)
+
+            quantity = (
+                candidate.notional_size / candidate.entry_price
+                if candidate.entry_price > 0
+                else None
+            )
+            return ValidationResult(
+                approved=True,
+                quantity=quantity,
+                final_leverage=candidate.leverage,
+                margin_required_usdt=candidate.notional_size / Decimal(str(candidate.leverage)),
+                max_loss_usdt=candidate.expected_net_loss,
+                max_profit_usdt=candidate.expected_net_profit,
+                rr_ratio=Decimal(str(candidate.actual_rr)),
+                warnings=warnings,
+                failed_checks=[],
+                risk_per_trade_pct=ctx.risk_per_trade,
+                expected_net_profit=candidate.expected_net_profit,
+                expected_net_loss=candidate.expected_net_loss,
+            )
+
+        except Exception as exc:
+            logger.error(
+                "Candidate risk validation SYSTEM_ERROR user_id=%s error=%s",
                 ctx.user_id, exc, exc_info=True,
             )
             return ValidationResult.system_error(type(exc).__name__)

@@ -85,9 +85,20 @@ class ValidationResult:
     # 경고 (거부 없이 주의 알림)
     warnings: list[str] = field(default_factory=list)
 
+    # Decision-layer candidate 검증 요약 (legacy path 호환을 위해 선택 필드)
+    failed_checks: list[str] = field(default_factory=list)
+    risk_per_trade_pct: float = 0.0
+    expected_net_profit: Decimal | None = None
+    expected_net_loss: Decimal | None = None
+
     @classmethod
     def reject(cls, code: str, reason: str) -> "ValidationResult":
-        return cls(approved=False, rejection_code=code, rejection_reason=reason)
+        return cls(
+            approved=False,
+            rejection_code=code,
+            rejection_reason=reason,
+            failed_checks=[code],
+        )
 
     @classmethod
     def hold_signal(cls) -> "ValidationResult":
