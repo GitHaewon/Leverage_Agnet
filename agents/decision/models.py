@@ -8,9 +8,9 @@ Decision layer 공유 데이터 모델.
   - float:   비율·점수·bps 단위 필드
 
 레이어 역할:
-  StrategyEngine    → TradeCandidate 생성 (결정적)
-  AIAnalystAgent    → AIReviewResult 반환 (검토만, 숫자 권한 없음)
-  RiskEngine        → RiskCheckResult 반환 (최종 안전 게이트)
+  DecisionEngine    → TradeCandidate 생성 (결정적, agents/decision/)
+  ReviewerAgent     → AIReviewResult 반환 (검토만, 숫자 권한 없음, agents/synthesis/)
+  RiskEngine        → ValidationResult 반환 (validate_candidate, 최종 안전 게이트)
   OrchestratorPipeline → FinalDecision 조립
 """
 from __future__ import annotations

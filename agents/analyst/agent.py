@@ -125,6 +125,11 @@ class AnalystAgent:
     OpenAI GPT 기반 AI 분석 에이전트.
 
     analyze() 호출 → 프롬프트 생성 → OpenAI API 호출 → 응답 파싱 → AnalystResult 반환.
+
+    DEPRECATED: AI가 시그널을 생성하던 경로. 결정적 DecisionEngine + ReviewerAgent로
+    대체됨 (agents/decision/, agents/synthesis/). 프로덕션 파이프라인은 더 이상 이
+    클래스를 사용하지 않는다. 신규 코드에서 사용 금지 — AI는 검토(APPROVE/REJECT)만 한다.
+    (레거시 테스트 호환 목적으로만 유지)
     """
 
     def __init__(
