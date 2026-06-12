@@ -7,6 +7,7 @@ Decision layer — 결정적 후보 생성 및 AI 리뷰 데이터 모델 + 임�
 from agents.decision.models import (
     AIReviewAction,
     AIReviewResult,
+    DerivativesMarketScore,
     FinalAction,
     FinalDecision,
     MarketRegime,
@@ -21,6 +22,7 @@ from agents.decision.models import (
 from agents.decision.regime import classify_market_regime
 from agents.decision.chart_signals import score_chart_signals
 from agents.decision.news_sentiment import score_news_sentiment
+from agents.decision.derivatives_market import score_derivatives_market
 from agents.decision.constants import (
     # Risk 사전 필터
     DECISION_MAX_LEVERAGE,
@@ -68,9 +70,11 @@ __all__ = [
     "classify_market_regime",
     "score_chart_signals",
     "score_news_sentiment",
+    "score_derivatives_market",
     # 모델
     "AIReviewAction",
     "AIReviewResult",
+    "DerivativesMarketScore",
     "FinalAction",
     "FinalDecision",
     "MarketRegime",

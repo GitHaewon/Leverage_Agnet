@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
@@ -234,6 +234,40 @@ class NewsSentimentScore:
             risk_score=0.0,
             no_trade_flag=False,
             reasons=["뉴스·감성 데이터 없음 — 중립 처리"],
+        )
+
+
+@dataclass
+class DerivativesMarketScore:
+    """
+    선물 파생 데이터 기반 시장 혼잡도·리스크 점수 결과.
+
+    역할: 직접 거래 트리거가 아닌 방향 점수 조정 및 리스크 필터.
+      - Price up + OI up + neutral funding → 롱 소폭 우대
+      - 고펀딩 + 롱 쏠림 → 롱 추격 감점, 리스크 증가
+      - 음수 펀딩 + 숏 쏠림 → 숏 추격 감점, 리스크 증가
+      - 가격 급변 + OI 감소 → 청산 이벤트 가능성으로 리스크 증가
+
+    long/short_score_adjustment: 상위 레이어 long_score / short_score 에 가산할 조정치
+    risk_score: 0 ~ 100 (높을수록 진입 위험)
+    crowded_side: LONG / SHORT / NONE
+    reasons: 결정 근거 문자열 목록
+    """
+    long_score_adjustment:  float
+    short_score_adjustment: float
+    risk_score:             float
+    crowded_side:           Literal["LONG", "SHORT", "NONE"]
+    reasons:                list[str] = field(default_factory=list)
+
+    @classmethod
+    def neutral(cls) -> "DerivativesMarketScore":
+        """데이터 없음 또는 오류 시 안전한 중립 결과."""
+        return cls(
+            long_score_adjustment=0.0,
+            short_score_adjustment=0.0,
+            risk_score=0.0,
+            crowded_side="NONE",
+            reasons=["파생 시장 데이터 없음 — 중립 처리"],
         )
 
 
