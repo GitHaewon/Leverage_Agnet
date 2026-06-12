@@ -25,6 +25,7 @@ from agents.decision.news_sentiment import score_news_sentiment
 from agents.decision.derivatives_market import score_derivatives_market
 from agents.decision.strategy_selector import select_strategy_type
 from agents.decision.candidate_generator import generate_trade_candidate
+from agents.decision.final_decision import decide_final_action
 from agents.decision.constants import (
     # Risk 사전 필터
     DECISION_MAX_LEVERAGE,
@@ -86,6 +87,7 @@ __all__ = [
     "score_derivatives_market",
     "select_strategy_type",
     "generate_trade_candidate",
+    "decide_final_action",
     # 모델
     "AIReviewAction",
     "AIReviewResult",
