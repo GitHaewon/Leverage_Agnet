@@ -1,7 +1,13 @@
 """
-Claude 응답 파서 — JSON 추출 + 시그널 검증.
+AI Reviewer 응답 파서.
 
-검증 실패 시 HOLD로 강제 변환 (AGENTS.md §5.6).
+JSON 추출 → AIReviewResult 반환.
+파싱 실패 시 안전 REJECT를 반환한다 — 예외를 밖으로 전파하지 않는다.
+
+안전 REJECT 기준 (CLAUDE.md 절대 규칙):
+  - JSON 파싱 실패
+  - review_action 필드 누락 / 유효하지 않은 값
+  - 예외 발생 시
 """
 from __future__ import annotations
 
@@ -9,81 +15,73 @@ import json
 import re
 from typing import Any
 
-from agents.synthesis.models import SynthesisResult
-
-MIN_CONFIDENCE = 0.60
-MIN_RR_RATIO = 2.0
+from agents.decision.models import AIReviewAction, AIReviewResult
 
 
-def parse_claude_response(raw: str) -> SynthesisResult:
-    """Claude 응답 문자열에서 JSON을 추출하고 SynthesisResult로 변환한다.
+def parse_review_response(raw: str) -> AIReviewResult:
+    """GPT 응답 문자열 → AIReviewResult.
 
-    JSON 파싱 실패 또는 검증 실패 시 HOLD를 반환한다.
+    파싱 실패 시 critical_contradiction=True인 안전 REJECT를 반환한다.
     """
     try:
         data = _extract_json(raw)
-        result = _dict_to_result(data, raw)
-        return _validate_and_enforce(result)
-    except Exception as exc:
-        return SynthesisResult.hold(reason=f"파싱 실패: {exc}", skipped=False)
+        return _build_result(data)
+    except Exception:
+        return _safe_reject()
 
+
+# ── 내부 파싱 ─────────────────────────────────────────────────────────────────
 
 def _extract_json(text: str) -> dict[str, Any]:
-    """응답에서 JSON 객체를 추출한다. 마크다운 코드블록도 처리한다."""
-    # 마크다운 코드블록 제거
+    """응답 텍스트에서 JSON 객체를 추출한다. 마크다운 코드블록도 처리."""
     cleaned = re.sub(r"```(?:json)?\n?(.*?)```", r"\1", text, flags=re.DOTALL)
-
-    # 중괄호로 묶인 JSON 추출
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if not match:
         raise ValueError("JSON 객체를 찾을 수 없습니다")
     return json.loads(match.group())
 
 
-def _dict_to_result(data: dict, raw: str) -> SynthesisResult:
-    direction = str(data.get("direction", "HOLD")).upper()
-    if direction not in ("LONG", "SHORT", "HOLD"):
-        direction = "HOLD"
+def _build_result(data: dict[str, Any]) -> AIReviewResult:
+    action_raw = str(data.get("review_action", "")).upper()
+    if action_raw == "APPROVE":
+        action = AIReviewAction.APPROVE
+    elif action_raw == "REJECT":
+        action = AIReviewAction.REJECT
+    else:
+        # 유효하지 않은 action → 안전 REJECT
+        return _safe_reject(reason_summary=f"invalid review_action: {action_raw!r}")
 
-    return SynthesisResult(
-        direction=direction,  # type: ignore[arg-type]
-        confidence=float(data.get("confidence", 0.0)),
-        entry_price=float(data.get("entry_price", 0.0)),
-        take_profit=_optional_float(data.get("take_profit")),
-        stop_loss=_optional_float(data.get("stop_loss")),
-        leverage=max(1, min(20, int(data.get("leverage", 1)))),
-        rr_ratio=float(data.get("rr_ratio", 0.0)),
-        reasons=list(data.get("reasons", [])),
-        raw_response=raw,
+    raw_confidence = data.get("confidence", 0.0)
+    confidence = max(0.0, min(1.0, float(raw_confidence)))
+
+    critical = bool(data.get("critical_contradiction", False))
+
+    warnings_raw = data.get("risk_warnings", [])
+    warnings = list(warnings_raw) if isinstance(warnings_raw, list) else []
+
+    reason = str(data.get("reason_summary", ""))
+
+    return AIReviewResult(
+        review_action=action,
+        confidence=round(confidence, 4),
+        critical_contradiction=critical,
+        risk_warnings=warnings,
+        reason_summary=reason,
     )
 
 
-def _validate_and_enforce(result: SynthesisResult) -> SynthesisResult:
-    """검증 실패 조건을 HOLD로 강제 변환한다 (AGENTS.md §5.6)."""
-    if result.direction == "HOLD":
-        return result
+# ── 안전 REJECT 팩토리 ────────────────────────────────────────────────────────
 
-    if result.confidence < MIN_CONFIDENCE:
-        return SynthesisResult.hold(
-            reason=f"confidence {result.confidence:.2f} < {MIN_CONFIDENCE} — HOLD 강제"
-        )
-
-    if result.stop_loss is None:
-        return SynthesisResult.hold(reason="stop_loss 없음 — HOLD 강제")
-
-    if result.rr_ratio < MIN_RR_RATIO:
-        return SynthesisResult.hold(
-            reason=f"R:R {result.rr_ratio:.2f} < {MIN_RR_RATIO} — HOLD 강제"
-        )
-
-    if len(result.reasons) < 3:
-        result.reasons = result.reasons + ["(추가 근거 없음)"] * (3 - len(result.reasons))
-
-    return result
-
-
-def _optional_float(val: Any) -> float | None:
-    try:
-        return float(val) if val is not None else None
-    except (TypeError, ValueError):
-        return None
+def _safe_reject(
+    *,
+    reason_summary: str = "AI review parse failed",
+    risk_warnings: list[str] | None = None,
+) -> AIReviewResult:
+    """파싱 실패 또는 유효하지 않은 응답에 대한 보수적 REJECT."""
+    return AIReviewResult(
+        review_action=AIReviewAction.REJECT,
+        confidence=0.0,
+        critical_contradiction=True,
+        risk_warnings=risk_warnings if risk_warnings is not None else ["invalid_json"],
+        reason_summary=reason_summary,
+    )
