@@ -8,6 +8,7 @@ LogStorage 프로토콜을 구현한 어떤 저장소든 주입 가능.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Protocol, runtime_checkable
 
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 class LogStorage(Protocol):
     async def save_step(self, run_id: str, step: AgentResult) -> None: ...
     async def save_pipeline(self, result: PipelineResult) -> None: ...
+    async def save_decision_log(self, run_id: str, payload: dict) -> None: ...
 
 
 # ── InMemoryLogStorage ────────────────────────────────────────────────────────
@@ -32,6 +34,7 @@ class InMemoryLogStorage:
     def __init__(self) -> None:
         self._steps: list[dict] = []
         self._pipelines: list[dict] = []
+        self._decision_logs: list[dict] = []
 
     async def save_step(self, run_id: str, step: AgentResult) -> None:
         self._steps.append({
@@ -59,6 +62,11 @@ class InMemoryLogStorage:
             "finished_at":      result.finished_at.isoformat(),
         })
 
+    async def save_decision_log(self, run_id: str, payload: dict) -> None:
+        row = dict(payload)
+        row["run_id"] = run_id
+        self._decision_logs.append(row)
+
     # ── 조회 (테스트용) ──────────────────────────────────────────────────────
 
     def get_steps(self, run_id: str) -> list[dict]:
@@ -67,9 +75,15 @@ class InMemoryLogStorage:
     def get_pipeline(self, run_id: str) -> dict | None:
         return next((p for p in self._pipelines if p["run_id"] == run_id), None)
 
+    def get_decision_logs(self, run_id: str | None = None) -> list[dict]:
+        if run_id is None:
+            return list(self._decision_logs)
+        return [d for d in self._decision_logs if d["run_id"] == run_id]
+
     def clear(self) -> None:
         self._steps.clear()
         self._pipelines.clear()
+        self._decision_logs.clear()
 
 
 # ── OrchestratorLogger ────────────────────────────────────────────────────────
@@ -119,3 +133,18 @@ class OrchestratorLogger:
             await self._storage.save_pipeline(result)
         except Exception as exc:
             logger.warning("[logger] pipeline 저장 실패: %s", exc)
+
+    async def log_decision(self, run_id: str, payload: dict) -> None:
+        row = dict(payload)
+        row["run_id"] = run_id
+        logger.info(
+            "decision_log %s",
+            json.dumps(row, ensure_ascii=False, sort_keys=True),
+        )
+        save = getattr(self._storage, "save_decision_log", None)
+        if save is None:
+            return
+        try:
+            await save(run_id, payload)
+        except Exception as exc:
+            logger.warning("[logger] decision log 저장 실패: %s", exc)

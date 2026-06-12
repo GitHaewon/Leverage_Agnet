@@ -30,6 +30,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from enum import Enum
 from typing import Any, Awaitable, Callable, Optional, Protocol, runtime_checkable
 
 from agents.orchestrator.logger import OrchestratorLogger
@@ -281,6 +282,18 @@ class OrchestratorPipeline:
             asyncio.ensure_future(self._logger.log_pipeline(result))
             return result
 
+        async def _log_decision(
+            rejection_reason: str | None = None,
+            execution_result: Any = None,
+        ) -> None:
+            payload = _build_decision_log_payload(
+                ctx=ctx,
+                symbol=symbol,
+                rejection_reason=rejection_reason,
+                execution_result=execution_result,
+            )
+            await self._logger.log_decision(ctx.run_id, payload)
+
         # ── Step 1: Market Data ──────────────────────────────────────────────
         r1 = await _run_step(
             "market_data",
@@ -364,6 +377,7 @@ class OrchestratorPipeline:
         from agents.decision.models import FinalAction
         if candidate is None or candidate.action == FinalAction.HOLD:
             reason = _candidate_hold_reason(candidate)
+            await _log_decision(reason)
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason=reason,
@@ -382,6 +396,7 @@ class OrchestratorPipeline:
             ctx.errors.append({"agent": "ai_review", "error": r5.error})
             ctx.ai_review = _safe_reject_review(r5.error or "ai_review_failed")
             logger.warning("[pipeline] ai_review 실패 — 안전 REJECT/HOLD: %s", r5.error)
+            await _log_decision("AI 리뷰 실패 — 안전 REJECT")
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason="AI 리뷰 실패 — 안전 REJECT",
@@ -390,6 +405,7 @@ class OrchestratorPipeline:
         ctx.ai_review = r5.output
         if _review_action(ctx.ai_review) == AIReviewAction.REJECT:
             reason = getattr(ctx.ai_review, "reason_summary", "") or "AI reviewer rejected candidate"
+            await _log_decision(reason)
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason=reason,
@@ -425,6 +441,7 @@ class OrchestratorPipeline:
             # RiskEngine 예외 → 보수적으로 HOLD (실행 없음)
             ctx.errors.append({"agent": "risk", "error": r6.error})
             logger.warning("[pipeline] risk 예외 — HOLD: %s", r6.error)
+            await _log_decision("RiskEngine 예외 — 보수적 HOLD")
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason="RiskEngine 예외 — 보수적 HOLD",
@@ -438,6 +455,7 @@ class OrchestratorPipeline:
                 "[pipeline] risk 거부 user=%s coin=%s failed_checks=%s reason=%s",
                 inp.user_id, inp.coin, failed_checks, reason,
             )
+            await _log_decision(reason)
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason=reason,
@@ -466,6 +484,7 @@ class OrchestratorPipeline:
             )
         ctx.final_decision = r7.output
         if ctx.final_decision.action == FinalAction.HOLD:
+            await _log_decision(ctx.final_decision.reason)
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason=ctx.final_decision.reason,
@@ -485,6 +504,7 @@ class OrchestratorPipeline:
         )
         if r8.failed:
             ctx.errors.append({"agent": "portfolio", "error": r8.error})
+            await _log_decision("PortfolioManager 실패 — 보수적 거부")
             return _finish(
                 PipelineStatus.REJECTED,
                 rejection_reason="PortfolioManager 실패 — 보수적 거부",
@@ -493,6 +513,7 @@ class OrchestratorPipeline:
         can_add, portfolio_reason = r8.output  # (bool, str)
         ctx.portfolio_check = r8.output
         if not can_add:
+            await _log_decision(portfolio_reason)
             return _finish(
                 PipelineStatus.REJECTED,
                 rejection_reason=portfolio_reason,
@@ -512,6 +533,7 @@ class OrchestratorPipeline:
         )
         if r9.failed:
             ctx.errors.append({"agent": "position_manager", "error": r9.error})
+            await _log_decision("PositionManager 실패")
             return _finish(
                 PipelineStatus.FAILED,
                 rejection_reason="PositionManager 실패",
@@ -541,6 +563,7 @@ class OrchestratorPipeline:
         )
         if r10.failed:
             ctx.errors.append({"agent": "execution", "error": r10.error})
+            await _log_decision("주문 실행 실패")
             return _finish(PipelineStatus.FAILED, rejection_reason="주문 실행 실패")
         ctx.execution_result = r10.output
         er = ctx.execution_result
@@ -555,6 +578,7 @@ class OrchestratorPipeline:
                 inp.user_id, inp.coin,
                 getattr(getattr(er, "entry_order", None), "exchange_order_id", "N/A"),
             )
+            await _log_decision("TP/SL 실패 + 긴급 청산 실패 — 수동 개입 필요", er)
             return _finish(
                 PipelineStatus.FAILED,
                 rejection_reason="TP/SL 실패 + 긴급 청산 실패 — 수동 개입 필요",
@@ -571,12 +595,14 @@ class OrchestratorPipeline:
                 await _fire_post_trade_hook(self._deps.post_trade_hook, inp, ctx)
             if self._deps.alert_dispatcher is not None:
                 await _fire_emergency_alert(self._deps.alert_dispatcher, inp, ctx)
+            await _log_decision("TP/SL 설정 실패 — 긴급 청산 완료", er)
             return _finish(
                 PipelineStatus.EMERGENCY_CLOSED,
                 rejection_reason="TP/SL 설정 실패 — 긴급 청산 완료",
                 execution_result=er,
             )
 
+        await _log_decision(None, er)
         return _finish(PipelineStatus.COMPLETED, execution_result=er)
 
 
@@ -740,6 +766,158 @@ def _find_same_coin_position(positions: list[Any], coin: str) -> Any | None:
         if getattr(p, "coin", None) == coin or getattr(p, "symbol", "").startswith(coin):
             return p
     return None
+
+
+def _build_decision_log_payload(
+    *,
+    ctx: PipelineContext,
+    symbol: str,
+    rejection_reason: str | None,
+    execution_result: Any = None,
+) -> dict[str, Any]:
+    """TradeCandidate / FinalDecision 전체 맥락을 JSON-compatible dict로 변환."""
+    candidate = ctx.candidate
+    decision = ctx.decision_result
+    final_decision = ctx.final_decision
+    risk = ctx.risk_result
+    ai_review = ctx.ai_review
+    snap = ctx.market_snapshot if isinstance(ctx.market_snapshot, dict) else {}
+    raw_signal = ctx.raw_signal
+
+    entry_order = getattr(execution_result, "entry_order", None)
+    candidate_action = _enum_value(getattr(candidate, "action", None))
+    action_obj = getattr(final_decision, "action", None)
+    if action_obj is None and rejection_reason is None:
+        action_obj = getattr(candidate, "action", None)
+    final_action = _enum_value(action_obj) or "HOLD"
+
+    risk_failed = list(getattr(risk, "failed_checks", []) or [])
+    risk_warnings = list(getattr(risk, "warnings", []) or [])
+    ai_reason = getattr(ai_review, "reason_summary", None)
+    if rejection_reason is None and final_action == "HOLD":
+        rejection_reason = getattr(final_decision, "reason", None) or ai_reason
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "coin": ctx.coin,
+        "symbol": getattr(candidate, "symbol", symbol) if candidate is not None else symbol,
+        "market_price": _primitive(snap.get("current_price") or snap.get("price")),
+        "signal_price": _primitive(getattr(raw_signal, "entry_price", None)),
+        "expected_entry_price": _primitive(getattr(candidate, "entry_price", None)),
+        "simulated_fill_price": _primitive(getattr(entry_order, "avg_fill_price", None)),
+        "spread_bps": _primitive(getattr(candidate, "spread_bps", None)),
+        "slippage_bps": _primitive(getattr(candidate, "slippage_bps", None)),
+        "market_regime": _market_regime_name(getattr(decision, "regime", None)),
+        "chart_score": _primitive(getattr(decision, "chart_score", None)),
+        "news_score": _primitive(getattr(decision, "news_score", None)),
+        "derivatives_score": _primitive(getattr(decision, "derivatives_score", None)),
+        "strategy_type": _enum_value(getattr(candidate, "strategy_type", None)),
+        "expected_holding_minutes": _primitive(
+            getattr(candidate, "expected_holding_minutes", None)
+        ),
+        "min_required_rr": _primitive(getattr(candidate, "min_required_rr", None)),
+        "actual_rr": _primitive(getattr(candidate, "actual_rr", None)),
+        "ai_review": _primitive(ai_review),
+        "risk_result": _primitive(risk),
+        "risk_failed_checks": risk_failed,
+        "risk_warnings": risk_warnings,
+        "candidate_action": candidate_action,
+        "final_action": final_action,
+        "rejection_reason": rejection_reason,
+        "leverage": _primitive(getattr(candidate, "leverage", None)),
+        "margin_ratio": _primitive(getattr(candidate, "margin_ratio", None)),
+        "margin_used": _primitive(getattr(risk, "margin_required_usdt", None)),
+        "notional_size": _primitive(getattr(candidate, "notional_size", None)),
+        "stop_loss": _primitive(getattr(candidate, "stop_loss", None)),
+        "take_profit": _primitive(getattr(candidate, "take_profit", None)),
+        "liquidation_price": _primitive(getattr(candidate, "liquidation_price", None)),
+        "liquidation_to_stop_safety_distance": _primitive(
+            _liq_stop_distance(candidate)
+        ),
+        "expected_gross_profit": _primitive(
+            getattr(candidate, "expected_gross_profit", None)
+        ),
+        "expected_gross_loss": _primitive(getattr(candidate, "expected_gross_loss", None)),
+        "expected_fees": _primitive(getattr(candidate, "expected_fees", None)),
+        "expected_slippage_cost": _primitive(
+            getattr(candidate, "expected_slippage_cost", None)
+        ),
+        "expected_net_profit": _primitive(getattr(candidate, "expected_net_profit", None)),
+        "expected_net_loss": _primitive(getattr(candidate, "expected_net_loss", None)),
+        "actual_result": _actual_result(execution_result),
+        "max_favorable_excursion": None,
+        "max_adverse_excursion": None,
+        "holding_time": None,
+        "funding_cost": _primitive(snap.get("funding_cost")),
+    }
+
+
+def _primitive(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_primitive(v) for v in value]
+    if isinstance(value, tuple):
+        return [_primitive(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _primitive(v) for k, v in value.items()}
+    if hasattr(value, "__dataclass_fields__"):
+        return {
+            field: _primitive(getattr(value, field))
+            for field in value.__dataclass_fields__
+        }
+    return str(value)
+
+
+def _enum_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
+
+
+def _market_regime_name(regime_result: Any) -> str | None:
+    regime = getattr(regime_result, "regime", regime_result)
+    return _enum_value(regime)
+
+
+def _liq_stop_distance(candidate: Any) -> Decimal | None:
+    if candidate is None:
+        return None
+    liq = getattr(candidate, "liquidation_price", None)
+    sl = getattr(candidate, "stop_loss", None)
+    if liq is None or sl is None:
+        return None
+    try:
+        return abs(Decimal(str(sl)) - Decimal(str(liq)))
+    except Exception:
+        return None
+
+
+def _actual_result(execution_result: Any) -> dict[str, Any] | None:
+    if execution_result is None:
+        return None
+    entry = getattr(execution_result, "entry_order", None)
+    emergency = getattr(execution_result, "emergency_close_order", None)
+    return {
+        "approved": _primitive(getattr(execution_result, "approved", None)),
+        "executed": _primitive(getattr(execution_result, "executed", None)),
+        "mode": _primitive(getattr(execution_result, "mode", None)),
+        "tp_sl_failed": _primitive(getattr(execution_result, "tp_sl_failed", None)),
+        "emergency_close_failed": _primitive(
+            getattr(execution_result, "emergency_close_failed", None)
+        ),
+        "entry_fill_price": _primitive(getattr(entry, "avg_fill_price", None)),
+        "entry_quantity": _primitive(getattr(entry, "quantity", None)),
+        "emergency_fill_price": _primitive(getattr(emergency, "avg_fill_price", None)),
+    }
 
 
 async def _fire_post_trade_hook(

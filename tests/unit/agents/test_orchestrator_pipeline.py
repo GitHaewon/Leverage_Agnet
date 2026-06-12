@@ -21,6 +21,7 @@ from __future__ import annotations
 import pytest
 
 from agents.decision.models import AIReviewAction, FinalAction, StrategyType
+from agents.orchestrator.logger import InMemoryLogStorage, OrchestratorLogger
 from agents.orchestrator.models import AgentStatus, PipelineStatus
 from agents.orchestrator.pipeline import OrchestratorPipeline
 from agents.orchestrator.runner import AgentRunner
@@ -50,6 +51,17 @@ from tests.unit.agents._orchestrator_fixtures import (
 
 def _pipeline(deps) -> OrchestratorPipeline:
     return OrchestratorPipeline(deps, runner=AgentRunner(max_retries=0))
+
+
+def _pipeline_with_storage(deps) -> tuple[OrchestratorPipeline, InMemoryLogStorage]:
+    storage = InMemoryLogStorage()
+    orch_logger = OrchestratorLogger(storage)
+    pipeline = OrchestratorPipeline(
+        deps,
+        runner=AgentRunner(max_retries=0),
+        orch_logger=orch_logger,
+    )
+    return pipeline, storage
 
 
 # ── 1 & 2. 정상 실행 경로 (LONG / SHORT) ──────────────────────────────────────
@@ -358,7 +370,156 @@ class TestShadowMode:
         assert shadow.call_count == 0
 
 
-# ── 10. 긴급 TP/SL 실패 처리 ──────────────────────────────────────────────────
+# ── 10. 결정 로그 / Shadow 의사결정 기록 ─────────────────────────────────────
+
+class TestDecisionLogs:
+    @pytest.mark.asyncio
+    async def test_long_candidate_decision_is_logged(self) -> None:
+        candidate = make_candidate(FinalAction.LONG)
+        deps = make_deps(
+            decision=MockDecisionProvider(result=make_decision_result(candidate)),
+            reviewer=MockReviewerProvider(result=make_review(AIReviewAction.APPROVE)),
+            risk=MockRiskProvider(result=MockValidationResult(approved=True)),
+        )
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        logs = storage.get_decision_logs(result.run_id)
+        assert len(logs) == 1
+        assert logs[0]["final_action"] == "LONG"
+        assert logs[0]["coin"] == "BTC"
+        assert logs[0]["symbol"] == "BTCUSDT"
+        assert logs[0]["expected_entry_price"] == 67000.0
+
+    @pytest.mark.asyncio
+    async def test_short_candidate_decision_is_logged(self) -> None:
+        candidate = make_candidate(FinalAction.SHORT)
+        deps = make_deps(
+            decision=MockDecisionProvider(result=make_decision_result(candidate)),
+            reviewer=MockReviewerProvider(result=make_review(AIReviewAction.APPROVE)),
+            risk=MockRiskProvider(result=MockValidationResult(approved=True)),
+        )
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        log = storage.get_decision_logs(result.run_id)[0]
+        assert log["final_action"] == "SHORT"
+        assert log["stop_loss"] == 68000.0
+        assert log["take_profit"] == 64600.0
+
+    @pytest.mark.asyncio
+    async def test_hold_candidate_decision_is_logged(self) -> None:
+        candidate = make_candidate(FinalAction.HOLD)
+        deps = make_deps(
+            decision=MockDecisionProvider(result=make_decision_result(candidate)),
+        )
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        log = storage.get_decision_logs(result.run_id)[0]
+        assert log["final_action"] == "HOLD"
+        assert log["rejection_reason"] == "candidate HOLD"
+        assert log["expected_fees"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_ai_reject_reason_is_logged(self) -> None:
+        review = make_review(AIReviewAction.REJECT)
+        review.reason_summary = "AI reviewer rejected noisy setup"
+        deps = make_deps(reviewer=MockReviewerProvider(result=review))
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        log = storage.get_decision_logs(result.run_id)[0]
+        assert log["candidate_action"] == "LONG"
+        assert log["final_action"] == "HOLD"
+        assert log["rejection_reason"] == "AI reviewer rejected noisy setup"
+        assert log["ai_review"]["review_action"] == "REJECT"
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_fallback_ai_review_is_logged(self) -> None:
+        deps = make_deps(reviewer=MockReviewerProvider(result=make_safe_reject_review()))
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        log = storage.get_decision_logs(result.run_id)[0]
+        assert log["ai_review"]["risk_warnings"] == ["invalid_json"]
+        assert log["ai_review"]["reason_summary"] == "AI review parse failed"
+
+    @pytest.mark.asyncio
+    async def test_risk_failed_checks_are_logged(self) -> None:
+        deps = make_deps(
+            risk=MockRiskProvider(
+                result=MockValidationResult(
+                    approved=False,
+                    rejection_reason="risk blocked",
+                    failed_checks=["ORDER_001", "SPREAD_TOO_HIGH"],
+                    warnings=["risk warning"],
+                )
+            )
+        )
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        log = storage.get_decision_logs(result.run_id)[0]
+        assert log["rejection_reason"] == "risk blocked"
+        assert log["risk_failed_checks"] == ["ORDER_001", "SPREAD_TOO_HIGH"]
+        assert log["risk_warnings"] == ["risk warning"]
+
+    @pytest.mark.asyncio
+    async def test_expected_costs_and_net_pnl_are_logged(self) -> None:
+        candidate = make_candidate(FinalAction.LONG)
+        deps = make_deps(
+            decision=MockDecisionProvider(result=make_decision_result(candidate)),
+            reviewer=MockReviewerProvider(result=make_review(AIReviewAction.APPROVE)),
+            risk=MockRiskProvider(result=MockValidationResult(approved=True)),
+        )
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        log = storage.get_decision_logs(result.run_id)[0]
+        assert log["expected_gross_profit"] == 130.0
+        assert log["expected_gross_loss"] == 48.0
+        assert log["expected_fees"] == 5.0
+        assert log["expected_slippage_cost"] == 3.0
+        assert log["expected_net_profit"] == 95.0
+        assert log["expected_net_loss"] == 56.0
+
+    @pytest.mark.asyncio
+    async def test_strategy_type_and_rr_fields_are_logged(self) -> None:
+        candidate = make_candidate(FinalAction.LONG, StrategyType.SCALPING)
+        deps = make_deps(
+            decision=MockDecisionProvider(result=make_decision_result(candidate)),
+            reviewer=MockReviewerProvider(result=make_review(AIReviewAction.APPROVE)),
+            risk=MockRiskProvider(result=MockValidationResult(approved=True)),
+        )
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        log = storage.get_decision_logs(result.run_id)[0]
+        assert log["strategy_type"] == "SCALPING"
+        assert log["expected_holding_minutes"] == 120
+        assert log["min_required_rr"] == 2.0
+        assert log["actual_rr"] == 2.2
+
+    @pytest.mark.asyncio
+    async def test_shadow_mode_logs_decision_without_real_order(self) -> None:
+        shadow = MockShadowExecutionProvider()
+        deps = make_deps(
+            reviewer=MockReviewerProvider(result=make_review(AIReviewAction.APPROVE)),
+            risk=MockRiskProvider(result=MockValidationResult(approved=True)),
+            execution=shadow,
+        )
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        log = storage.get_decision_logs(result.run_id)[0]
+        assert shadow.real_orders_placed == 0
+        assert result.execution_result.placed_real_order is False
+        assert log["final_action"] == "LONG"
+        assert log["actual_result"]["mode"] == "shadow"
+
+
+# ── 11. 긴급 TP/SL 실패 처리 ──────────────────────────────────────────────────
 
 class TestEmergencyTpSl:
     @pytest.mark.asyncio
