@@ -18,6 +18,7 @@ from agents.decision.models import (
     TradeCandidate,
 )
 from agents.decision.regime import classify_market_regime
+from agents.decision.chart_signals import score_chart_signals
 from agents.decision.constants import (
     # Risk 사전 필터
     DECISION_MAX_LEVERAGE,
@@ -63,6 +64,7 @@ from agents.decision.constants import (
 __all__ = [
     # 분류 함수
     "classify_market_regime",
+    "score_chart_signals",
     # 모델
     "AIReviewAction",
     "AIReviewResult",
