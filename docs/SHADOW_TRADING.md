@@ -109,6 +109,16 @@ Analyze the generated log with:
 .venv/bin/python scripts/analyze_shadow_performance.py logs/shadow_smoke_decisions.jsonl
 ```
 
+To append deterministic closed sample rows for analyzer verification, add:
+
+```bash
+.venv/bin/python scripts/run_shadow_smoke.py --symbol BTCUSDT --include-closed-samples
+```
+
+This writes one winning LONG, one losing LONG, one winning SHORT, and one HOLD
+rejection after the normal smoke decision. The sample rows are JSONL fixtures
+only; they do not place orders or call exchange APIs.
+
 To explicitly call the real AI reviewer, pass `--use-real-ai` and ensure
 `OPENAI_API_KEY` is set:
 

@@ -252,9 +252,172 @@ def _write_jsonl(path: Path, payload: dict[str, Any]) -> None:
         fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-async def run_smoke(symbol: str, output: Path, use_real_ai: bool = False) -> dict[str, Any]:
+def _closed_sample_row(
+    *,
+    timestamp: str,
+    symbol: str,
+    coin: str,
+    action: str,
+    strategy_type: str,
+    status: str,
+    net_pnl: Decimal,
+    gross_pnl: Decimal,
+    expected_fees: Decimal,
+    expected_slippage_cost: Decimal,
+    actual_rr: float,
+) -> dict[str, Any]:
+    return {
+        "timestamp": timestamp,
+        "symbol": symbol,
+        "coin": coin,
+        "market_regime": "TREND_UP" if action == "LONG" else "TREND_DOWN",
+        "candidate_action": action,
+        "final_action": action,
+        "strategy_type": strategy_type,
+        "expected_gross_profit": str(abs(gross_pnl)) if net_pnl > 0 else "0",
+        "expected_gross_loss": str(abs(gross_pnl)) if net_pnl < 0 else "0",
+        "expected_net_profit": str(net_pnl) if net_pnl > 0 else "0",
+        "expected_net_loss": str(abs(net_pnl)) if net_pnl < 0 else "0",
+        "expected_fees": str(expected_fees),
+        "expected_slippage_cost": str(expected_slippage_cost),
+        "actual_rr": actual_rr,
+        "spread_bps": 1.0,
+        "funding_rate": -0.0001 if action == "LONG" else 0.0001,
+        "ai_review": {
+            "review_action": "APPROVE",
+            "confidence": 0.86,
+            "critical_contradiction": False,
+            "risk_warnings": [],
+            "reason_summary": "closed sample fixture",
+        },
+        "risk_result": {
+            "approved": True,
+            "rejection_code": None,
+            "rejection_reason": None,
+            "failed_checks": [],
+            "warnings": [],
+        },
+        "risk_failed_checks": [],
+        "rejection_reason": None,
+        "actual_result": {
+            "executed": True,
+            "closed": True,
+            "status": status,
+            "mode": "paper",
+            "net_pnl": str(net_pnl),
+            "gross_pnl": str(gross_pnl),
+            "holding_minutes": 45,
+        },
+    }
+
+
+def _hold_sample_row(timestamp: str, symbol: str, coin: str) -> dict[str, Any]:
+    reason = "sample HOLD rejection: insufficient confluence"
+    return {
+        "timestamp": timestamp,
+        "symbol": symbol,
+        "coin": coin,
+        "market_regime": "RANGE",
+        "candidate_action": "HOLD",
+        "final_action": "HOLD",
+        "strategy_type": "INTRADAY",
+        "expected_gross_profit": None,
+        "expected_gross_loss": None,
+        "expected_net_profit": None,
+        "expected_net_loss": None,
+        "expected_fees": "0",
+        "expected_slippage_cost": "0",
+        "actual_rr": 0.0,
+        "spread_bps": 1.5,
+        "funding_rate": 0.0,
+        "ai_review": {
+            "review_action": "REJECT",
+            "confidence": 0.72,
+            "critical_contradiction": False,
+            "risk_warnings": [],
+            "reason_summary": reason,
+        },
+        "risk_result": {
+            "approved": False,
+            "rejection_code": "SAMPLE_HOLD",
+            "rejection_reason": reason,
+            "failed_checks": ["SAMPLE_HOLD"],
+            "warnings": [],
+        },
+        "risk_failed_checks": ["SAMPLE_HOLD"],
+        "rejection_reason": reason,
+        "actual_result": {
+            "executed": False,
+            "closed": False,
+            "mode": "paper",
+        },
+    }
+
+
+def _closed_sample_rows(symbol: str) -> list[dict[str, Any]]:
+    coin = _coin_from_symbol(symbol)
+    now = datetime.now(timezone.utc).isoformat()
+    return [
+        _closed_sample_row(
+            timestamp=now,
+            symbol=symbol,
+            coin=coin,
+            action="LONG",
+            strategy_type="TREND_FOLLOWING",
+            status="TP_HIT",
+            net_pnl=Decimal("100"),
+            gross_pnl=Decimal("120"),
+            expected_fees=Decimal("12"),
+            expected_slippage_cost=Decimal("8"),
+            actual_rr=2.4,
+        ),
+        _closed_sample_row(
+            timestamp=now,
+            symbol=symbol,
+            coin=coin,
+            action="LONG",
+            strategy_type="TREND_FOLLOWING",
+            status="SL_HIT",
+            net_pnl=Decimal("-50"),
+            gross_pnl=Decimal("-45"),
+            expected_fees=Decimal("3"),
+            expected_slippage_cost=Decimal("2"),
+            actual_rr=2.1,
+        ),
+        _closed_sample_row(
+            timestamp=now,
+            symbol=symbol,
+            coin=coin,
+            action="SHORT",
+            strategy_type="BREAKOUT",
+            status="TP_HIT",
+            net_pnl=Decimal("80"),
+            gross_pnl=Decimal("95"),
+            expected_fees=Decimal("10"),
+            expected_slippage_cost=Decimal("5"),
+            actual_rr=2.8,
+        ),
+        _hold_sample_row(now, symbol, coin),
+    ]
+
+
+def write_closed_sample_rows(symbol: str, output: Path) -> list[dict[str, Any]]:
+    rows = _closed_sample_rows(symbol.upper())
+    for row in rows:
+        _write_jsonl(output, row)
+    return rows
+
+
+async def run_smoke(
+    symbol: str,
+    output: Path,
+    use_real_ai: bool = False,
+    include_closed_samples: bool = False,
+) -> dict[str, Any]:
     if _env_bool("LIVE_TRADING_ENABLED"):
         raise RuntimeError("Refusing to run: LIVE_TRADING_ENABLED=true")
+    if include_closed_samples and use_real_ai:
+        raise RuntimeError("--include-closed-samples cannot be combined with --use-real-ai")
 
     symbol = symbol.upper()
     coin = _coin_from_symbol(symbol)
@@ -355,6 +518,8 @@ async def run_smoke(symbol: str, output: Path, use_real_ai: bool = False) -> dic
         },
     }
     _write_jsonl(output, payload)
+    if include_closed_samples:
+        payload["closed_samples_written"] = len(write_closed_sample_rows(symbol, output))
     return payload
 
 
@@ -372,6 +537,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Call the real AI reviewer. Default uses a fake reviewer fixture.",
     )
+    parser.add_argument(
+        "--include-closed-samples",
+        action="store_true",
+        help="Append deterministic closed sample rows for analyzer metric checks.",
+    )
     return parser.parse_args(argv)
 
 
@@ -385,7 +555,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  use_real_ai={args.use_real_ai}")
 
     try:
-        payload = asyncio.run(run_smoke(args.symbol, args.output, args.use_real_ai))
+        payload = asyncio.run(
+            run_smoke(
+                args.symbol,
+                args.output,
+                args.use_real_ai,
+                args.include_closed_samples,
+            )
+        )
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -393,6 +570,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Final action: {payload['final_action']}")
     print(f"Strategy: {payload['strategy_type']}")
     print(f"Executed in shadow: {payload['actual_result']['executed']}")
+    if args.include_closed_samples:
+        print(f"Closed sample rows written: {payload.get('closed_samples_written', 0)}")
     print(f"Wrote shadow smoke decision log: {args.output}")
     return 0
 
