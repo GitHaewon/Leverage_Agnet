@@ -52,3 +52,6 @@ celerybeat.pid
 *.key
 *.cert
 secrets/
+
+# Windows 절대경로가 repo 내부로 잘못 생성된 경우
+backend/C*/
