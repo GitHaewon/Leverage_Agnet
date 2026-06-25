@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -18,6 +19,10 @@ from celery import Task
 
 from app.workers.celery_app import celery_app
 from app.core.config import settings
+from app.schemas.shadow_decisions import (
+    pipeline_status_to_action as _pipeline_status_to_action,
+    infer_rejection_stage as _infer_rejection_stage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +194,8 @@ async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
                         # NullPool 엔진으로 새 세션 생성 — asyncio.run() event loop 경계 문제 방지
                         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
                         from sqlalchemy.pool import NullPool
+                        from app.repositories.shadow_decision_repository import ShadowDecisionRepository
+                        from app.schemas.shadow_decisions import ShadowDecisionRecord
                         _engine = create_async_engine(settings.async_database_url, poolclass=NullPool)
                         try:
                             _sf = async_sessionmaker(
@@ -197,6 +204,22 @@ async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
                             async with _sf() as session:
                                 shadow_deps = await _build_deps(redis_client, session=session)
                                 result = await OrchestratorPipeline(shadow_deps).run(inp)
+                                _final_action = _pipeline_status_to_action(
+                                    result.status, result.execution_result
+                                )
+                                await ShadowDecisionRepository(session).save(
+                                    ShadowDecisionRecord(
+                                        run_id=str(result.run_id),
+                                        user_id=str(user.id),
+                                        coin=coin,
+                                        final_action=_final_action,  # type: ignore[arg-type]
+                                        decided_at=datetime.now(timezone.utc),
+                                        rejection_reason=result.rejection_reason,
+                                        rejection_stage=_infer_rejection_stage(
+                                            result.status, result.rejection_reason
+                                        ),
+                                    )
+                                )
                                 await session.commit()
                         finally:
                             await _engine.dispose()
@@ -272,9 +295,25 @@ async def _run_single_async(
 
         if settings.SHADOW_TRADING_ENABLED and not settings.LIVE_TRADING_ENABLED:
             from app.core.database import AsyncSessionLocal
+            from app.repositories.shadow_decision_repository import ShadowDecisionRepository
+            from app.schemas.shadow_decisions import ShadowDecisionRecord
             async with AsyncSessionLocal() as session:
                 deps = await _build_deps(redis_client, session=session)
                 result = await OrchestratorPipeline(deps).run(inp)
+                _final_action = _pipeline_status_to_action(result.status, result.execution_result)
+                await ShadowDecisionRepository(session).save(
+                    ShadowDecisionRecord(
+                        run_id=str(result.run_id),
+                        user_id=user_id,
+                        coin=coin,
+                        final_action=_final_action,  # type: ignore[arg-type]
+                        decided_at=datetime.now(timezone.utc),
+                        rejection_reason=result.rejection_reason,
+                        rejection_stage=_infer_rejection_stage(
+                            result.status, result.rejection_reason
+                        ),
+                    )
+                )
                 await session.commit()
         else:
             deps = await _build_deps(redis_client, user_id=uid)
