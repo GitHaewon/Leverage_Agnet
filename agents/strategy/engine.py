@@ -20,8 +20,6 @@ from agents.strategy.models import (
     confidence_to_leverage,
 )
 from agents.strategy.rsi_reversal import RSIReversalStrategy
-from agents.decision.strategy_selector import is_strategy_allowed_for_regime
-
 logger = logging.getLogger(__name__)
 
 _ALL_STRATEGY_NAMES = ("ema_trend", "rsi_reversal", "breakout")
@@ -111,6 +109,8 @@ def build_strategy_candidates(
     market_regime: object | None,
 ) -> list[StrategyCandidate]:
     """StrategySignal 목록을 국면별 StrategyCandidate 목록으로 변환한다."""
+    from agents.decision.strategy_selector import is_strategy_allowed_for_regime
+
     candidates: list[StrategyCandidate] = []
     for sig in signals:
         candidate_name = _SIGNAL_TO_CANDIDATE_NAME.get(
