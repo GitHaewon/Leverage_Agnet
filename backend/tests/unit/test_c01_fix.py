@@ -9,7 +9,9 @@ from __future__ import annotations
 import importlib
 import sys
 import uuid
+from datetime import time
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -62,7 +64,7 @@ async def test_expire_old_signals_returns_zero_when_nothing_to_expire():
         async def __aexit__(self, *_):
             pass
 
-    with patch("app.services.signal_service.AsyncSessionLocal", _MockSession):
+    with patch("app.services.signal_service.celery_session", _MockSession):
         from app.services.signal_service import expire_old_signals
         count = await expire_old_signals()
 
@@ -83,7 +85,7 @@ async def test_expire_old_signals_returns_rowcount():
         async def __aexit__(self, *_):
             pass
 
-    with patch("app.services.signal_service.AsyncSessionLocal", _MockSession):
+    with patch("app.services.signal_service.celery_session", _MockSession):
         from app.services.signal_service import expire_old_signals
         count = await expire_old_signals()
 
@@ -108,7 +110,7 @@ async def test_get_auto_trading_users_empty_db_returns_empty_list():
         async def __aexit__(self, *_):
             pass
 
-    with patch("app.services.user_service.AsyncSessionLocal", _MockSession):
+    with patch("app.services.user_service.celery_session", _MockSession):
         from app.services.user_service import get_auto_trading_users
         users = await get_auto_trading_users()
 
@@ -128,7 +130,7 @@ async def test_get_user_context_raises_for_missing_user():
         async def __aexit__(self, *_):
             pass
 
-    with patch("app.services.user_service.AsyncSessionLocal", _MockSession):
+    with patch("app.services.user_service.celery_session", _MockSession):
         from app.services.user_service import get_user_context
         with pytest.raises(ValueError, match="not found"):
             await get_user_context(str(uuid.uuid4()))
@@ -141,8 +143,68 @@ def test_user_trading_context_defaults():
     from app.services.user_service import UserTradingContext
     uid = uuid.uuid4()
     ctx = UserTradingContext(id=uid, plan="free")
-    assert ctx.account_state is None
+    assert ctx.user_id == uid
     assert ctx.daily_loss_usdt == Decimal("0")
     assert ctx.weekly_limit_usdt == Decimal("500")
     assert ctx.consecutive_losses == 0
     assert ctx.open_positions == []
+    assert ctx.risk_per_trade == 0.01
+    assert ctx.max_leverage == 5
+    assert ctx.is_trading_active is True
+
+
+def test_user_trading_context_from_user_builds_shadow_accounts():
+    from app.services.user_service import UserTradingContext
+
+    uid = uuid.uuid4()
+    user = SimpleNamespace(
+        id=uid,
+        plan="pro",
+        risk_profile="moderate",
+        settings=SimpleNamespace(
+            risk_per_trade=Decimal("0.02"),
+            max_leverage=7,
+            max_concurrent_positions=2,
+            daily_loss_limit=Decimal("250"),
+            is_trading_active=True,
+            allowed_hours_start=time(0, 0),
+            allowed_hours_end=time(23, 59),
+        ),
+    )
+
+    with patch(
+        "app.services.user_service.app_settings.SHADOW_INITIAL_BALANCE_USDT",
+        Decimal("10000"),
+    ):
+        ctx = UserTradingContext.from_user(user)
+
+    assert ctx.user_id == uid
+    assert ctx.account_state.available_balance == Decimal("10000")
+    assert ctx.portfolio_account.available_balance == Decimal("10000")
+    assert ctx.risk_per_trade == 0.02
+    assert ctx.max_leverage == 7
+    assert ctx.max_concurrent_positions == 2
+    assert ctx.daily_loss_limit_pct == 0.025
+    assert ctx.weekly_limit_usdt == Decimal("1250")
+    assert ctx.allowed_hours_start == "00:00"
+    assert ctx.allowed_hours_end == "23:59"
+
+
+def test_user_trading_context_does_not_fake_live_account():
+    from app.services.user_service import UserTradingContext
+
+    user = SimpleNamespace(
+        id=uuid.uuid4(),
+        plan="pro",
+        risk_profile="moderate",
+        settings=None,
+    )
+
+    with (
+        patch("app.services.user_service.app_settings.LIVE_TRADING_ENABLED", True),
+        patch("app.services.user_service.app_settings.SHADOW_TRADING_ENABLED", False),
+    ):
+        ctx = UserTradingContext.from_user(user)
+
+    assert ctx.account_state is None
+    assert ctx.portfolio_account is None

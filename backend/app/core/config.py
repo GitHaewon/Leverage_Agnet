@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import PostgresDsn, RedisDsn, field_validator, model_validator
@@ -49,8 +50,10 @@ class Settings(BaseSettings):
     # LIVE_TRADING_ENABLED: CTO 승인 없이 절대 true로 변경 금지
     LIVE_TRADING_ENABLED: bool = False
     MOCK_TRADING_MODE: bool = False        # True = 실제 API 호출 없음 (개발/테스트)
-    # SHADOW_TRADING_ENABLED: Risk 검증 통과 시그널을 가상 체결로 기록 (실제 주문 없음)
+    # SHADOW_TRADING_ENABLED: Risk 검증 통과 시그널을 가상 체결로 기록
+    # 실제 주문은 만들지 않는다.
     SHADOW_TRADING_ENABLED: bool = False
+    SHADOW_INITIAL_BALANCE_USDT: Decimal = Decimal("10000")
 
     # ── Binance URL ─────────────────────────────────────────────────────────────
     BINANCE_TESTNET_BASE_URL: str = "https://testnet.binancefuture.com"
