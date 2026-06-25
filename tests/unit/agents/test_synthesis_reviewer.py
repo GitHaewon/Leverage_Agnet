@@ -45,6 +45,7 @@ import json
 import pytest
 
 from agents.decision.models import AIReviewAction, AIReviewResult
+from agents.synthesis.agent import ReviewerAgent
 from agents.synthesis.models import ReviewInput
 from agents.synthesis.parser import parse_review_response, _safe_reject
 from agents.synthesis.prompt import SYSTEM_PROMPT, build_review_prompt
@@ -120,6 +121,16 @@ def _make_review_input(**kwargs) -> ReviewInput:
     return ReviewInput(**defaults)
 
 
+class _FakeOpenAIClient:
+    def __init__(self, response: str | None = None) -> None:
+        self.response = response or _approve_json()
+        self.call_count = 0
+
+    async def create_message(self, **kwargs):
+        self.call_count += 1
+        return self.response, 10, 5
+
+
 # ── Parser 테스트 ─────────────────────────────────────────────────────────────
 
 class TestParserApprove:
@@ -146,6 +157,75 @@ class TestParserApprove:
     def test_parse_approve_reason_summary(self) -> None:
         result = parse_review_response(_approve_json(reason_summary="valid setup"))
         assert "valid setup" in result.reason_summary
+
+
+# ── ReviewerAgent 시장 국면 플레이북 사전 필터 ───────────────────────────────
+
+class TestReviewerPlaybookGuard:
+    @pytest.mark.asyncio
+    async def test_high_volatility_rejects_without_ai_call(self) -> None:
+        client = _FakeOpenAIClient()
+        reviewer = ReviewerAgent(client)
+        result = await reviewer.review(_make_review_input(market_regime="HIGH_VOLATILITY"))
+        assert result.review_action == AIReviewAction.REJECT
+        assert "regime_high_volatility_no_trade" in result.risk_warnings
+        assert client.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_range_rejects_trend_pullback(self) -> None:
+        client = _FakeOpenAIClient()
+        reviewer = ReviewerAgent(client)
+        result = await reviewer.review(
+            _make_review_input(market_regime="RANGE", strategy_type="TREND_PULLBACK")
+        )
+        assert result.review_action == AIReviewAction.REJECT
+        assert "strategy_not_allowed_for_regime" in result.risk_warnings
+        assert client.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_range_rejects_breakout_retest(self) -> None:
+        client = _FakeOpenAIClient()
+        reviewer = ReviewerAgent(client)
+        result = await reviewer.review(
+            _make_review_input(market_regime="RANGE", strategy_type="BREAKOUT_RETEST")
+        )
+        assert result.review_action == AIReviewAction.REJECT
+        assert "strategy_not_allowed_for_regime" in result.risk_warnings
+        assert client.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_trend_up_allows_playbook_strategy_and_calls_ai(self) -> None:
+        client = _FakeOpenAIClient()
+        reviewer = ReviewerAgent(client)
+        result = await reviewer.review(
+            _make_review_input(market_regime="TREND_UP", strategy_type="BREAKOUT_RETEST")
+        )
+        assert result.review_action == AIReviewAction.APPROVE
+        assert client.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_regime_rejects_without_ai_call(self) -> None:
+        client = _FakeOpenAIClient()
+        reviewer = ReviewerAgent(client)
+        result = await reviewer.review(_make_review_input(market_regime="UNKNOWN"))
+        assert result.review_action == AIReviewAction.REJECT
+        assert "regime_unknown_conservative_reject" in result.risk_warnings
+        assert client.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_strategy_min_rr_rejects_without_ai_call(self) -> None:
+        client = _FakeOpenAIClient()
+        reviewer = ReviewerAgent(client)
+        result = await reviewer.review(
+            _make_review_input(
+                market_regime="TREND_UP",
+                strategy_type="TREND_PULLBACK",
+                actual_rr=1.5,
+            )
+        )
+        assert result.review_action == AIReviewAction.REJECT
+        assert "strategy_min_rr_not_met" in result.risk_warnings
+        assert client.call_count == 0
 
 
 class TestParserReject:

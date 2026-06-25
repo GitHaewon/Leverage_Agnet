@@ -12,12 +12,25 @@ import logging
 from agents.strategy.base import BaseStrategy
 from agents.strategy.breakout import BreakoutStrategy
 from agents.strategy.ema_trend import EMATrendStrategy
-from agents.strategy.models import AggregatedSignal, StrategyInput, StrategySignal, confidence_to_leverage
+from agents.strategy.models import (
+    AggregatedSignal,
+    StrategyCandidate,
+    StrategyInput,
+    StrategySignal,
+    confidence_to_leverage,
+)
 from agents.strategy.rsi_reversal import RSIReversalStrategy
+from agents.decision.strategy_selector import is_strategy_allowed_for_regime
 
 logger = logging.getLogger(__name__)
 
 _ALL_STRATEGY_NAMES = ("ema_trend", "rsi_reversal", "breakout")
+
+_SIGNAL_TO_CANDIDATE_NAME: dict[str, str] = {
+    "ema_trend": "TREND_PULLBACK",
+    "breakout": "BREAKOUT_RETEST",
+    "rsi_reversal": "RANGE_MEAN_REVERSION",
+}
 
 
 def _build_strategies(names: tuple[str, ...], timeframe: str) -> list[BaseStrategy]:
@@ -54,6 +67,7 @@ class StrategyEngine:
         signals = [s.evaluate(inp) for s in self._strategies]
 
         agg = _aggregate(signals, inp)
+        agg.candidates = build_strategy_candidates(signals, market_regime=None)
 
         logger.debug(
             "StrategyEngine coin=%s direction=%s confidence=%.2f strategies=%s",
@@ -77,6 +91,59 @@ class StrategyEngine:
             )
 
         return agg
+
+    def generate_candidates(
+        self,
+        inp: StrategyInput,
+        market_regime: object,
+    ) -> list[StrategyCandidate]:
+        """시장 국면에 허용되는 전략 후보들을 생성한다.
+
+        기존 전략 evaluate() 결과를 StrategyCandidate로 변환하는 adapter이며,
+        AggregatedSignal 다수결 동작은 변경하지 않는다.
+        """
+        signals = [s.evaluate(inp) for s in self._strategies]
+        return build_strategy_candidates(signals, market_regime)
+
+
+def build_strategy_candidates(
+    signals: list[StrategySignal],
+    market_regime: object | None,
+) -> list[StrategyCandidate]:
+    """StrategySignal 목록을 국면별 StrategyCandidate 목록으로 변환한다."""
+    candidates: list[StrategyCandidate] = []
+    for sig in signals:
+        candidate_name = _SIGNAL_TO_CANDIDATE_NAME.get(
+            sig.strategy_name,
+            sig.strategy_name.upper(),
+        )
+        if market_regime is not None and not is_strategy_allowed_for_regime(
+            candidate_name,
+            market_regime,
+        ):
+            continue
+        if sig.direction not in ("LONG", "SHORT"):
+            continue
+        if sig.take_profit is None or sig.stop_loss is None:
+            continue
+        if sig.rr_ratio <= 0:
+            continue
+        candidates.append(
+            StrategyCandidate(
+                strategy_name=candidate_name,
+                source_strategy=sig.strategy_name,
+                direction=sig.direction,
+                confidence=sig.confidence,
+                entry=sig.entry,
+                take_profit=sig.take_profit,
+                stop_loss=sig.stop_loss,
+                leverage=sig.leverage,
+                rr_ratio=sig.rr_ratio,
+                reason=sig.reason,
+                signals_fired=list(sig.signals_fired),
+            )
+        )
+    return sorted(candidates, key=lambda c: (c.confidence, c.rr_ratio), reverse=True)
 
 
 def _aggregate(signals: list[StrategySignal], inp: StrategyInput) -> AggregatedSignal:

@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # 실제 주문은 만들지 않는다.
     SHADOW_TRADING_ENABLED: bool = False
     SHADOW_INITIAL_BALANCE_USDT: Decimal = Decimal("10000")
+    SHADOW_MIN_LONG_SCORE: float | None = None
+    SHADOW_MIN_SHORT_SCORE: float | None = None
+    SHADOW_MAX_RISK_SCORE: float | None = None
+    SHADOW_AI_REVIEW_REQUIRED: bool = True
 
     # ── Binance URL ─────────────────────────────────────────────────────────────
     BINANCE_TESTNET_BASE_URL: str = "https://testnet.binancefuture.com"

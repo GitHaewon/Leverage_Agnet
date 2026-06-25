@@ -159,6 +159,7 @@ class TradeCandidate:
 
     # ── 근거 ─────────────────────────────────────────────────────────────────
     reasons: list[str] = field(default_factory=list)
+    strategy_name: Optional[str] = None
 
 
 @dataclass

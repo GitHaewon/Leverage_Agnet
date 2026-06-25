@@ -105,6 +105,9 @@ class PipelineInput:
     open_positions: list[Any] = field(default_factory=list)   # PortfolioPosition[]
     portfolio_account: Any = None                              # AccountContext
 
+    # DecisionEngine 런타임 오버라이드. 기본 None이면 live 보수 상수 사용.
+    decision_config: Any = None
+
 
 # ── PipelineContext ───────────────────────────────────────────────────────────
 

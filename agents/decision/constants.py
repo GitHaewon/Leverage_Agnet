@@ -28,9 +28,9 @@ DECISION_MAX_WEEKLY_LOSS_PCT: float = 0.08        # 주간 손실 한도 8%
 DECISION_MAX_CONSECUTIVE_LOSSES: int = 3          # 연속 손실 쿨다운 기준
 DECISION_MAX_OPEN_POSITIONS: int    = 1           # 동시 오픈 포지션 상한
 
-# 후보 생성 단계 사전 필터 R:R (전략별 하한은 STRATEGY_THRESHOLDS 참고)
-# Risk Engine 최종 게이트는 agents/risk/constants.MIN_RR_RATIO = 2.0 이 적용된다.
-GLOBAL_MIN_RISK_REWARD_RATIO: float = 1.2
+# 후보 생성 단계 R:R 하한 — Risk Engine 최종 게이트(MIN_RR_RATIO = 2.0)와 동일하게 설정.
+# 1.2/1.5로 만든 TP는 RiskEngine에서 즉시 거부되므로 DOA 후보를 만들지 않는다.
+GLOBAL_MIN_RISK_REWARD_RATIO: float = 2.0
 
 MIN_EXPECTED_NET_PROFIT_PCT: float  = 0.001       # 예상 순수익 최소 0.1%
 DECISION_MAX_SLIPPAGE_BPS: float    = 3.0         # 진입 허용 최대 슬리피지 (bps)
@@ -52,7 +52,7 @@ DEFAULT_SLIPPAGE_BPS: float = 3.0       # 기본 슬리피지 추정 (bps)
 
 MIN_LONG_SCORE: float  = 75.0   # SignalScore.long_score  최소값 (0~100 스케일)
 MIN_SHORT_SCORE: float = 75.0   # SignalScore.short_score 최소값
-MAX_RISK_SCORE: float  = 30.0   # SignalScore.risk_score  상한 (이 이상이면 HOLD)
+MAX_RISK_SCORE: float  = 55.0   # SignalScore.risk_score  상한 (TREND_FOLLOWING 선택 천장과 정렬)
 
 # AIReviewResult.confidence 는 float 0.0~1.0; 사용자 입력 70 → 0.70 변환
 MIN_AI_REVIEW_CONFIDENCE: float          = 0.70
@@ -78,12 +78,12 @@ class StrategyThresholds:
 
 STRATEGY_THRESHOLDS: dict[str, StrategyThresholds] = {
     "SCALPING": StrategyThresholds(
-        min_risk_reward_ratio = 1.2,
+        min_risk_reward_ratio = 2.0,   # RiskEngine MIN_RR_RATIO = 2.0 과 정렬
         max_holding_minutes   = 10,
         max_spread_bps        = 3.0,
     ),
     "INTRADAY": StrategyThresholds(
-        min_risk_reward_ratio = 1.5,
+        min_risk_reward_ratio = 2.0,   # RiskEngine MIN_RR_RATIO = 2.0 과 정렬
         max_holding_minutes   = 60,
         max_spread_bps        = 5.0,
     ),
@@ -97,6 +97,48 @@ STRATEGY_THRESHOLDS: dict[str, StrategyThresholds] = {
         max_holding_minutes   = 120,
         max_spread_bps        = 6.0,
     ),
+}
+
+# ── 시장 국면별 전략 플레이북 ─────────────────────────────────────────────────
+# 문자열 기반 adapter 규칙이다. 기존 StrategyType enum과 AggregatedSignal 구조는
+# 유지하면서, ReviewerAgent가 후보 검토 전 사전 필터로 참고한다.
+
+REGIME_ALLOWED_STRATEGIES: dict[str, tuple[str, ...]] = {
+    "TREND_UP": (
+        "TREND_FOLLOWING",
+        "TREND_PULLBACK",
+        "BREAKOUT",
+        "BREAKOUT_RETEST",
+        "INTRADAY",
+    ),
+    "TREND_DOWN": (
+        "TREND_FOLLOWING",
+        "TREND_PULLBACK",
+        "BREAKOUT",
+        "BREAKOUT_RETEST",
+        "INTRADAY",
+    ),
+    "RANGE": (
+        "MEAN_REVERSION",
+        "RSI_REVERSAL",
+        "SCALPING",
+        "INTRADAY",
+    ),
+    "HIGH_VOLATILITY": (),
+    "NEWS_EVENT": (),
+    "UNKNOWN": (),
+}
+
+STRATEGY_MIN_RR: dict[str, float] = {
+    "SCALPING": 2.0,
+    "INTRADAY": 2.0,
+    "TREND_FOLLOWING": 2.0,
+    "TREND_PULLBACK": 2.0,
+    "BREAKOUT": 2.0,
+    "BREAKOUT_RETEST": 2.0,
+    "MEAN_REVERSION": 2.0,
+    "RSI_REVERSAL": 2.0,
+    "UNKNOWN": 999.0,
 }
 
 

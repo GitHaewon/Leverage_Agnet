@@ -33,7 +33,11 @@ from agents.decision.constants import (
     STRATEGY_MAX_RISK_FOR_SCALPING,
 )
 from agents.decision.models import MarketRegime, StrategySelectionResult, StrategyType
-from agents.decision.strategy_selector import select_strategy_type
+from agents.decision.strategy_selector import (
+    get_allowed_strategies_for_regime,
+    is_strategy_allowed_for_regime,
+    select_strategy_type,
+)
 
 
 # ── 픽스처 헬퍼 ──────────────────────────────────────────────────────────────
@@ -76,6 +80,31 @@ def _news(risk=0.0, no_trade_flag=False) -> _NewsScore:
 
 def _deriv(risk=0.0, crowded="NONE") -> _DerivScore:
     return _DerivScore(risk_score=risk, crowded_side=crowded)
+
+
+# ── 시장 국면별 전략 플레이북 helper ─────────────────────────────────────────
+
+class TestRegimeStrategyPlaybook:
+    def test_trend_up_allows_trend_pullback_and_breakout_retest(self) -> None:
+        assert is_strategy_allowed_for_regime("TREND_PULLBACK", MarketRegime.TREND_UP)
+        assert is_strategy_allowed_for_regime("BREAKOUT_RETEST", MarketRegime.TREND_UP)
+
+    def test_range_rejects_trend_pullback_and_breakout_retest(self) -> None:
+        assert not is_strategy_allowed_for_regime("TREND_PULLBACK", MarketRegime.RANGE)
+        assert not is_strategy_allowed_for_regime("BREAKOUT_RETEST", MarketRegime.RANGE)
+
+    def test_range_allows_mean_reversion_style_strategies(self) -> None:
+        allowed = get_allowed_strategies_for_regime(MarketRegime.RANGE)
+        assert "MEAN_REVERSION" in allowed
+        assert is_strategy_allowed_for_regime("SCALPING", MarketRegime.RANGE)
+
+    def test_high_volatility_allows_no_strategy(self) -> None:
+        assert get_allowed_strategies_for_regime(MarketRegime.HIGH_VOLATILITY) == ()
+        assert not is_strategy_allowed_for_regime("TREND_FOLLOWING", MarketRegime.HIGH_VOLATILITY)
+
+    def test_unknown_is_conservative(self) -> None:
+        assert get_allowed_strategies_for_regime(MarketRegime.UNKNOWN) == ()
+        assert not is_strategy_allowed_for_regime("SCALPING", MarketRegime.UNKNOWN)
 
 
 def _market(spread=1.0, vol_ratio=1.0, price_change=0.5) -> dict:

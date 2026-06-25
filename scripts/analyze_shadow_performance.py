@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Analyze shadow trading decision logs."""
+"""Analyze shadow trading decision logs or shadow_decisions JSONL exports."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,10 @@ from agents.shadow.performance_analysis import (
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze shadow decision logs")
-    parser.add_argument("input", help="JSONL file or app log containing decision_log JSON")
+    parser.add_argument(
+        "input",
+        help="decision_log JSONL/app log or shadow_decisions DB export JSONL",
+    )
     parser.add_argument(
         "--output",
         "-o",

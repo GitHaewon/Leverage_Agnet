@@ -1,581 +1,479 @@
 # AI Trading Copilot
 
-> AI가 24시간 암호화폐 시장을 지켜보고, 대신 거래해주는 서비스입니다.
+**Crypto Futures Trading Decision-Support Pipeline**
+
+암호화폐 선물 시장 데이터를 수집하고, 결정적 규칙으로 거래 후보를 생성한 뒤,
+AI가 검토하고 리스크 엔진이 최종 안전 게이트를 수행하는 의사결정 지원 시스템이다.
 
 ---
 
-## 이게 뭔가요?
+## 안전 공지 (Safety Notice)
 
-한 문장으로 요약하면:
+> **이 프로젝트는 금융 조언이 아닙니다.**
+> 암호화폐 선물 거래는 원금 전액 손실이 가능한 고위험 투자입니다.
 
-> **비트코인·이더리움 선물 거래를 AI가 자동으로 대신 해주는 구독 서비스**입니다.
-
-직접 차트를 볼 필요 없습니다. 잠을 자는 동안에도 AI가 시장을 분석하고, 지금 사야 할지 팔아야 할지 판단해서, 직접 주문을 냅니다. 거래가 끝나면 수익·손실 기록도 자동으로 저장됩니다.
-
-**수익을 보장하는 서비스가 아닙니다.** 암호화폐 선물 거래는 원금 손실이 가능한 고위험 투자입니다. AI가 더 일관되고 감정 없는 규칙으로 거래할 수 있을 뿐입니다.
-
----
-
-## 어떤 분들을 위한 서비스인가요?
-
-| 이런 분들께 | 이유 |
-|---|---|
-| 암호화폐에 관심 있지만 차트 볼 시간이 없는 직장인 | AI가 24시간 대신 모니터링 |
-| 감정적으로 판단해서 손해를 자주 보는 분 | AI는 규칙대로만 거래, 감정 없음 |
-| 자동매매를 써보고 싶은데 어디서 시작할지 모르는 분 | API Key만 등록하면 바로 시작 |
-| 실제 돈 넣기 전에 먼저 테스트해보고 싶은 분 | **Shadow Mode** — 가짜 돈으로 먼저 연습 가능 |
-| 리스크 관리가 걱정되는 분 | 손절가 없으면 아예 주문을 안 냄 |
+- **실거래 주문 실행은 기본 비활성화**(`LIVE_TRADING_ENABLED=false`)되어 있다. 플래그를 `true`로 변경하기 전에 반드시 shadow 기간을 충분히 거쳐야 한다.
+- AI(`ReviewerAgent`)는 후보를 `APPROVE` 또는 `REJECT`만 할 수 있다. 진입가·손절가·목표가·레버리지를 만들거나 수정하는 권한이 없다.
+- `HIGH_VOLATILITY` 또는 `NEWS_EVENT` 국면에서는 모든 신규 진입이 차단된다. `UNKNOWN` 국면도 보수적으로 `REJECT`된다.
+- 다양한 코인을 지원하도록 설계되어 있으나, 코인마다 유동성·변동성·스프레드·펀딩비가 다르므로 동일한 임계값을 그대로 사용하면 안 된다.
+- 사용자는 실제 API Key나 자금을 연결하기 전에 반드시 충분한 shadow 테스트와 backtesting을 수행해야 한다.
 
 ---
 
-## 이 서비스만의 차별점
+## 프로젝트 개요
 
-시중에 자동매매 프로그램은 많습니다. AI Trading Copilot이 다른 이유는 이것입니다.
+### 목적
 
-### 1. AI 5개가 협력해서 판단한다
+이 프로젝트는 **실거래 자동 실행 봇이 아니다.** 현재 주된 운영 목적은 다음과 같다:
 
-다른 서비스는 보통 차트 지표 하나나 둘로 판단합니다. 이 서비스는 **전문이 다른 분석 모듈 5개**가 각자의 분석을 내놓고, 결정적 코드가 거래 후보를 생성한 뒤, GPT가 검토합니다.
+1. **Shadow Trading / Paper Decision Evaluation** — 실제 시장 데이터로 가상 거래 결정을 평가한다.
+2. **Decision-Support Pipeline** — 시장 데이터 → 기술적 분석 → 전략 → 결정 → AI 리뷰 → 리스크 검증 → 최종 결정 → 로그까지 이어지는 파이프라인을 제공한다.
+3. **AI는 Reviewer 역할만 수행** — 결정적 코드(`DecisionEngine`)가 거래 후보를 생성하고, GPT 기반 `ReviewerAgent`가 검토하며, `RiskEngine`이 최종 안전 게이트를 담당한다. AI가 직접 주문을 결정하지 않는다.
+
+### 멀티 심볼 지원
+
+파이프라인은 `coin` 파라미터(예: `"BTC"`, `"ETH"`)를 입력받아 `{coin}USDT` 심볼로 작동한다.
+
+- **현재 구조**: 파이프라인 1회 실행 = 코인 1개 처리. 여러 코인을 처리하려면 파이프라인을 코인별로 반복 실행한다.
+- **BTC는 기본 예시 심볼**이다. `scripts/` 하위 스모크 테스트와 `verify_openai.py`에서 `BTCUSDT` 픽스처 데이터를 사용하지만, 프로젝트가 BTC 전용은 아니다.
+- 다른 코인으로 전환하려면 `PipelineInput(coin="ETH", ...)` 또는 실행 스크립트의 `--symbol` 인자를 변경한다.
+
+---
+
+## Pipeline 구조
 
 ```
-차트 전문가 AI   →  RSI, MACD, 볼린저밴드 등 계산
-뉴스 전문가 AI   →  최신 뉴스 긍정/부정 감성 분석
-시장구조 AI      →  큰손 포지션, 선물 펀딩비 분석
-          ↓ 세 결과를 결정적 코드로 종합
-결정 엔진        →  TradeCandidate 생성 (진입가·손절가·목표가·레버리지 확정)
-          ↓ 후보를 AI에게 검토 의뢰
-GPT-5 리뷰 AI   →  APPROVE / REJECT만 반환 (숫자 변경 불가)
-          ↓ 승인되면
-리스크 검증      →  손절·R:R·손실 한도 최종 확인
+Step 1.  market_data       CRITICAL   실패 → FAILED (파이프라인 중단)
+Step 2.  technical         DEGRADED   실패 → 중립값(tech_score=0.0)으로 계속
+Step 3.  strategy          DEGRADED   실패 → 중립값으로 계속
+Step 4.  decision          결정적      국면/점수/전략선택/후보 생성. 예외·HOLD → 종료
+Step 5.  ai_review         검토 전용   APPROVE/REJECT만. 파싱 실패 → 안전 REJECT → HOLD
+Step 6.  risk              GATE        validate_candidate. 예외/거부 → HOLD (실행 없음)
+Step 7.  final_decision    결정적      candidate+review+risk 조립. HOLD → 실행 없음
+Step 8.  portfolio         GATE        실패/거부 → REJECTED
+Step 9.  position_manager  실패 → FAILED
+Step 10. execution         실패 → FAILED (retry=3) | TP/SL 실패 → 긴급 청산
 ```
 
-어느 하나가 통과 안 되면 주문은 나가지 않습니다.
-
----
-
-### 2. Shadow Mode — 실제 데이터로 가짜 거래
-
-> "실제 돈 넣기 전에 이 AI가 잘 하는지 먼저 보고 싶다"는 분들을 위한 기능입니다.
-
-Shadow Mode를 켜면:
-- 분석과 판단은 **실제 시장 데이터**로 동일하게 실행
-- 주문은 **Binance에 실제로 나가지 않음**
-- 가상으로 진입·청산이 기록되고, 손익·보유시간까지 계산
-- 충분히 검증한 뒤 실거래로 전환
-
-**가상 자금으로 먼저 성과를 확인한 뒤 실거래를 시작할 수 있습니다.**
-
----
-
-### 3. 긴급 상황에도 자산이 보호된다
-
-주문이 나간 뒤 예상치 못한 오류가 생겨도 대응 프로토콜이 작동합니다.
-
-```
-정상:   진입 → 목표가/손절가 설정 → 포지션 유지 중
-
-비정상: 진입은 됐는데 목표가·손절가 설정이 실패했다면?
-          → 자동으로 1회 재시도
-          → 재시도도 실패 → 즉시 시장가로 긴급 청산
-          → 텔레그램으로 즉시 알림 발송
-          → 실제 체결가 기준 손익을 손실 한도에 정확히 반영
-```
-
-손절가 없이 포지션이 방치되는 일이 없습니다.
-
----
-
-### 4. 손실 한도 시스템이 정확하다
-
-많은 자동매매 서비스가 "일일 손실 한도"를 설정한다고 하지만, 계산이 부정확합니다.
-
-이 서비스는:
-- 포지션이 **실제로 청산된 시점의 체결 가격**으로 손익을 계산합니다
-- 아직 열려 있는 포지션의 **미실현 손익은 한도에 포함하지 않습니다**
-- 한도 계산에 오차가 없어서 "멀쩡한 계좌가 갑자기 잠기는" 일이 없습니다
-
----
-
-### 5. 출금은 원천 차단
-
-이 서비스에 Binance API Key를 등록할 때, **출금 권한이 있는 Key는 시스템이 즉시 거부**합니다.
-
-최악의 해킹 시나리오에서도 거래소 계정의 돈이 외부로 빠져나가는 것은 불가능합니다.
-
----
-
-## 어떻게 작동하나요?
-
-AI가 15분마다 자동으로 아래 단계를 실행합니다.
-
-```
-1단계  차트 분석
-       RSI, MACD, 볼린저 밴드 등 기술적 지표를 계산합니다.
-       쉽게 말해 "최근 가격 흐름이 어떤가?" 를 봅니다.
-           ↓
-2단계  뉴스·심리 분석
-       최신 뉴스를 AI가 읽고 긍정/부정을 점수로 매깁니다.
-       공포/탐욕 지수도 확인합니다. (극단적 공포 = 매수 기회일 수 있음)
-           ↓
-3단계  파생상품 시장 분석
-       "지금 큰손들이 어느 방향에 베팅하고 있는가?" 를 봅니다.
-       미결제약정, 펀딩비, 롱/숏 비율을 확인합니다.
-           ↓
-4단계  결정 엔진 (결정적 코드)
-       위 3가지 데이터를 종합해 거래 후보(진입가·손절가·목표가·레버리지)를 생성합니다.
-       GPT-5가 후보를 검토하고 APPROVE / REJECT를 반환합니다.
-       AI 신뢰도가 70% 미만이면 "지금은 거래하지 않는다"고 판단합니다.
-           ↓
-5단계  리스크 검증  ← 이 단계는 절대 건너뛸 수 없습니다
-       손절가가 있는가?
-       목표:손실 비율이 2:1 이상인가?
-       레버리지가 한도 이내인가?
-       일일·주간 손실 한도가 남아 있는가?
-       하나라도 실패하면 주문은 취소됩니다.
-           ↓
-6단계  실거래 또는 Shadow 기록
-```
-
----
-
-## 자동으로 멈추는 조건
-
-아래 상황이 감지되면 자동매매가 즉시 멈추고, 텔레그램으로 알림이 옵니다.
-
-| 상황 | 중단 범위 |
-|---|---|
-| 오늘 손실이 설정한 일일 한도 도달 | 오늘 자정까지 |
-| 이번 주 손실이 주간 한도 도달 | 다음 월요일까지 |
-| 같은 방향으로 5번 연속 손실 | 수동 재시작 때까지 |
-| 계좌 잔고가 고점 대비 20% 하락 | 수동 재시작 때까지 |
-| Binance API 연결이 3번 연속 끊김 | 30분 |
-| 대시보드에서 직접 긴급 중단 | 수동 재시작 때까지 |
-
----
-
-## 텔레그램으로 받는 알림
-
-자동매매 과정에서 실시간으로 알림이 옵니다.
-
-| 알림 종류 | 내용 |
-|---|---|
-| 🚀 주문 체결 | Binance에서 실제 포지션이 열렸을 때 |
-| ✅ 목표가 도달 (익절) | 목표한 가격에서 자동으로 청산됐을 때 |
-| 🔴 손절가 도달 | 손절 기준선에서 자동으로 청산됐을 때 |
-| 🚨 긴급 청산 완료 | TP/SL 오류 → 긴급 청산이 실행됐을 때 |
-| ⛔ 자동매매 중단 | 손실 한도 등 안전 규칙이 발동됐을 때 |
-
----
-
-## AI가 만드는 시그널 예시
-
-분석을 마치면 이런 형태의 결과가 나옵니다.
-
-```
-코인:      BTC (비트코인)
-방향:      LONG (가격이 오를 것으로 예상)
-신뢰도:    78%
-진입가:    $67,500
-목표가:    $69,800  (+3.4%)
-손절가:    $66,350  (-1.7%)
-손익비:    2.0 : 1
-레버리지:  5배
-
-근거:
-  RSI(14) = 38 — 과매도 구간 진입
-  MACD 골든크로스 형성 중
-  볼린저 밴드 하단 반등 확인
-  미결제약정 증가 + 펀딩비 음수 → 롱 포지션 유리
-  공포/탐욕 지수 29 (극단적 공포) → 단기 반전 가능성 높음
-```
-
-이 시그널이 리스크 검증을 통과해야 실제 주문으로 이어집니다.
-
----
-
-## 구독 플랜
-
-| 플랜 | 월 가격 | 주요 기능 |
+| 컴포넌트 | 클래스 | 역할 |
 |---|---|---|
-| **Free** | 무료 | AI 시그널 열람만 가능, 실제 주문 없음, 코인 1개 |
-| **Pro** | $29 | 자동매매 실행, Shadow Mode, 코인 2개, 텔레그램 알림, 레버리지 최대 10배 |
-| **Elite** | $99 | 모든 기능 해제, 코인 5개, 우선 고객 지원, 레버리지 최대 20배 |
+| `decision` | `DecisionEngine` | 결정적 `TradeCandidate` 생성 (AI 호출 없음) |
+| `ai_review` | `ReviewerAgent` (GPT) | `APPROVE` / `REJECT`만 — 숫자 권한 없음 |
+| `risk` | `RiskEngine.validate_candidate` | 최종 안전 게이트 (R:R, SL, 손실 한도 등) |
+| `final_decision` | `decide_final_action` | 세 레이어를 조합, HOLD 아니면 실행 경로 |
+| `execution` | `ExecutionEngine` / `ShadowExecutionEngine` | 실거래 또는 Shadow 기록 |
+
+**안전 원칙**: FinalDecision이 `LONG` 또는 `SHORT`일 때만 실행 경로에 도달한다. 분류/점수/후보생성/AI리뷰/리스크/최종결정 중 어떤 예외도 `HOLD`/`REJECT`로 귀결된다.
 
 ---
 
-## 지금까지 만들어진 것
+## Market Regime & Strategy Playbook
 
-### 핵심 기능
+`DecisionEngine`과 `ReviewerAgent`는 모두 `REGIME_ALLOWED_STRATEGIES` 플레이북을 참조한다.
 
-- 이메일 회원가입 + 로그인 (Google OTP 2단계 인증)
-- Binance Futures API Key 등록 (AES-256 암호화 저장, 출금 권한 차단)
-- AI 5단계 분석 파이프라인 (15분마다 자동 실행)
-- 자동 주문 실행 + 손절/목표가 자동 설정
-- **Shadow Trading Mode** — 실제 데이터 기반 가상 거래 + PnL 기록
-- 긴급 청산 프로토콜 (TP/SL 오류 시 자동 시장가 청산)
-- 정확한 실현 손익 계산 (체결 가격 기준)
-- 킬스위치 — 일일·주간·연속 손실 자동 중단
-- 텔레그램 알림 5종 (체결, 익절, 손절, 긴급 청산, 중단)
-- Stripe 구독 결제 (Free / Pro / Elite)
-- 거래 일지 — 모든 거래 기록 자동 저장
+### MarketRegime 분류
 
-### 화면 구성
-
-| 화면 | 내용 |
+| Regime | 설명 |
 |---|---|
-| 대시보드 | 계좌 잔고, 수익 차트, 현재 포지션 요약 |
-| 포지션 | 실시간 손익, 청산까지 거리, 즉시 청산 버튼 |
-| 거래 내역 | 전체 주문 기록, 검색·필터 |
-| 리스크 현황 | 승률, 최대 낙폭(MDD), 샤프 비율, 일별 수익 그래프 |
-| Shadow 결과 | 가상 거래 성과 — 진입가·청산가·PnL·보유시간 |
+| `TREND_UP` | 상승 추세 |
+| `TREND_DOWN` | 하락 추세 |
+| `RANGE` | 횡보 |
+| `HIGH_VOLATILITY` | 고변동성 — **모든 신규 진입 차단** |
+| `NEWS_EVENT` | 뉴스 이벤트 — **모든 신규 진입 차단** |
+| `UNKNOWN` | 불명확 — **보수적 REJECT** |
+
+### REGIME_ALLOWED_STRATEGIES
+
+```python
+REGIME_ALLOWED_STRATEGIES = {
+    "TREND_UP":       ("TREND_FOLLOWING", "TREND_PULLBACK", "BREAKOUT", "BREAKOUT_RETEST", "INTRADAY"),
+    "TREND_DOWN":     ("TREND_FOLLOWING", "TREND_PULLBACK", "BREAKOUT", "BREAKOUT_RETEST", "INTRADAY"),
+    "RANGE":          ("MEAN_REVERSION", "RSI_REVERSAL", "SCALPING", "INTRADAY"),
+    "HIGH_VOLATILITY": (),    # No Trade
+    "NEWS_EVENT":     (),     # No Trade
+    "UNKNOWN":        (),     # Conservative reject
+}
+```
+
+### 전략별 최소 R:R (STRATEGY_MIN_RR)
+
+모든 전략의 최소 R:R은 `2.0`이다. `RiskEngine`은 이 값을 최종 강제한다.
+
+```python
+STRATEGY_MIN_RR = {
+    "SCALPING":        2.0,
+    "INTRADAY":        2.0,
+    "TREND_FOLLOWING": 2.0,
+    "TREND_PULLBACK":  2.0,
+    "BREAKOUT":        2.0,
+    "BREAKOUT_RETEST": 2.0,
+    "MEAN_REVERSION":  2.0,
+    "RSI_REVERSAL":    2.0,
+    "UNKNOWN":         999.0,  # 사실상 전략 없음
+}
+```
+
+### 전략 선택 우선순위 (`select_strategy_type`)
+
+```
+1. TREND_FOLLOWING   (TREND_UP/DOWN + 강한 방향성)
+2. BREAKOUT          (거래량 급증 + 이른 진입 기회)
+3. INTRADAY          (보통 추세·횡보 + 적정 방향성)
+4. SCALPING          (저변동 + 타이트 스프레드 + 소폭 엣지)
+5. UNKNOWN           (조건 미충족 → 상위 레이어 HOLD 처리)
+```
+
+### ReviewerAgent 플레이북 가드
+
+`ReviewerAgent`는 GPT 호출 전에 결정적으로 플레이북을 적용한다:
+- `HIGH_VOLATILITY` / `NEWS_EVENT` / `UNKNOWN` 국면 → 즉시 `REJECT`
+- 현재 국면에서 허용되지 않는 전략 → 즉시 `REJECT`
+- 전략별 최소 R:R 미충족 → 즉시 `REJECT`
+
+플레이북 통과 후에만 GPT API가 호출된다.
 
 ---
 
-## 직접 실행해보기
-
-### 프론트엔드만 체험하기 (데이터베이스 불필요)
-
-**필요한 것:** Node.js (https://nodejs.org 에서 무료 설치)
-
-```bash
-# 1. 소스 코드 받기
-git clone <repo-url>
-cd Leverage_Agent/frontend
-npm install
-
-# 2. 가짜 API 서버 시작 (새 터미널)
-node mock-server.mjs
-
-# 3. 웹 화면 시작
-npm run dev
-```
-
-브라우저에서 `http://localhost:3000` 접속
+## 디렉토리 구조
 
 ```
-이메일:   demo@trading.com
-비밀번호: Demo1234!
+Leverage_Agent/
+├── agents/
+│   ├── alert/              # Telegram alert dispatcher
+│   ├── analyst/            # (deprecated — 마이그레이션 보류 중)
+│   ├── backtest/           # 백테스팅 엔진
+│   ├── decision/           # 핵심 의사결정 레이어
+│   │   ├── candidate_generator.py   # TradeCandidate 생성
+│   │   ├── chart_signals.py         # 차트 시그널 점수화
+│   │   ├── constants.py             # 임계값 상수 (REGIME_ALLOWED_STRATEGIES 등)
+│   │   ├── derivatives_market.py    # 파생 시장 점수화
+│   │   ├── engine.py                # DecisionEngine (결정적)
+│   │   ├── final_decision.py        # decide_final_action
+│   │   ├── models.py                # TradeCandidate, AIReviewResult, FinalAction 등
+│   │   ├── news_sentiment.py        # 뉴스 감성 점수화
+│   │   ├── regime.py                # classify_market_regime
+│   │   └── strategy_selector.py     # select_strategy_type
+│   ├── execution/          # ExecutionEngine, ExecutionGateway
+│   ├── market_data/        # 시장 데이터 수집·정규화
+│   ├── market_structure/   # OI, 펀딩비, 롱숏 비율
+│   ├── monitoring/         # Prometheus 메트릭
+│   ├── orchestrator/       # OrchestratorPipeline (10단계 조율)
+│   ├── paper_trading/      # Paper trading 엔진 (독립 모듈)
+│   ├── portfolio/          # 포트폴리오 관리
+│   ├── position_manager/   # 포지션 라이프사이클 (TP/SL, 긴급 청산, DCA)
+│   ├── risk/               # RiskEngine, KillSwitch, 포지션 사이징
+│   ├── sentiment/          # 뉴스 수집, Fear & Greed 지수
+│   ├── shadow/             # ShadowExecutionEngine, performance_analysis
+│   ├── strategy/           # 전략 구현 (breakout, ema_trend, rsi_reversal)
+│   ├── synthesis/          # ReviewerAgent (GPT 기반 AI 리뷰어)
+│   └── technical_analysis/ # 기술 지표 계산 (RSI, MACD, BB, EMA 등)
+│
+├── backend/                # FastAPI 웹 서비스 레이어
+│   ├── app/                # API routes, services, repositories, models, schemas
+│   ├── alembic/            # DB 마이그레이션
+│   ├── scripts/            # 백엔드 전용 스크립트
+│   ├── tests/              # 백엔드 단위·통합 테스트
+│   ├── pyproject.toml      # Python 3.12+, pytest, ruff, mypy 설정
+│   ├── requirements.txt    # 운영 의존성
+│   └── requirements-dev.txt
+│
+├── docs/
+│   ├── DECISION_FLOW.md    # 파이프라인 전체 흐름 상세 설명
+│   ├── RISK_ENGINE.md      # 안전 규칙·포지션 사이징 공식
+│   ├── SHADOW_TRADING.md   # Shadow 모드 설정·결과 해석
+│   ├── LIVE_TRADING_CHECKLIST.md  # 실거래 전환 체크리스트
+│   └── KNOWN_ISSUES.md     # 알려진 이슈·설계 트레이드오프
+│
+├── logs/
+│   ├── shadow_smoke_decisions.jsonl   # 스모크 테스트 의사결정 로그
+│   └── shadow_smoke_summary.json      # 스모크 테스트 요약
+│
+├── scripts/
+│   ├── run_shadow_smoke.py            # Shadow 스모크 테스트 실행
+│   ├── analyze_shadow_performance.py  # Decision 로그 성과 분석
+│   └── verify_openai.py               # OpenAI 연결 검증
+│
+├── tests/
+│   ├── unit/agents/        # 에이전트 레이어 단위 테스트
+│   ├── unit/backend/       # 백엔드 단위 테스트
+│   └── integration/        # Binance Testnet 통합 테스트
+│
+├── .env.example
+├── docker-compose.yml
+├── CLAUDE.md               # 개발 절대 규칙 (CTO 권한)
+└── ARCHITECTURE.md         # 전체 시스템 아키텍처
 ```
 
 ---
 
-### 전체 시스템 실행 (Docker)
+## 설치 방법
 
-> PostgreSQL, Redis, AI 서버, 웹 화면을 한 번에 실행합니다.
-> Docker Desktop (https://www.docker.com) 설치 필요
-
-**1단계 — 설정 파일 준비**
+**Python 3.12 이상이 필요하다.** (macOS 기준)
 
 ```bash
+# 1. 프로젝트 루트에서 가상환경 생성
+cd Leverage_Agent
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+# 2. 백엔드 의존성 설치 (에이전트 레이어 테스트 포함)
+pip install -r backend/requirements.txt
+pip install -r backend/requirements-dev.txt
+
+# 3. 환경변수 설정
 cp .env.example .env
+# .env 파일을 열어 필요한 항목을 채운다 (아래 환경변수 설명 참조)
 ```
 
-`.env` 파일을 열어서 아래 항목을 채웁니다.
+> `.env` 파일은 절대 git에 커밋하지 않는다. `.gitignore`에 이미 등록되어 있다.
 
-| 항목 | 발급 방법 |
-|---|---|
-| `OPENAI_API_KEY` | https://platform.openai.com/api-keys |
-| `BINANCE_ENCRYPT_KEY` | 아래 명령어로 생성 |
-| `JWT_SECRET` | 아래 명령어로 생성 |
-| `JWT_REFRESH_SECRET` | 아래 명령어로 생성 (다른 값으로) |
+---
+
+## 주요 환경변수
+
+`.env.example`을 복사해 `.env`를 작성한다.
+
+| 변수 | 설명 | 기본값 |
+|---|---|---|
+| `OPENAI_API_KEY` | ReviewerAgent GPT 호출에 필요 | (필수 입력) |
+| `OPENAI_MODEL` | 사용할 GPT 모델 (소스 하드코딩 금지) | `gpt-5` |
+| `BINANCE_TESTNET` | `true`: Testnet 사용 / `false`: 실거래 | `true` |
+| `BINANCE_ENCRYPT_KEY` | Binance API Key 암호화용 32자 hex | (필수 입력) |
+| `LIVE_TRADING_ENABLED` | 실거래 전환 플래그 | `false` |
+| `SHADOW_TRADING_ENABLED` | Shadow 가상 기록 활성화 | `false` |
+| `SHADOW_INITIAL_BALANCE_USDT` | Shadow 초기 가상 잔고 | `10000` |
+| `SHADOW_MIN_LONG_SCORE` | Shadow 전용 long_score 하한 완화 | (기본 75.0) |
+| `SHADOW_MIN_SHORT_SCORE` | Shadow 전용 short_score 하한 완화 | (기본 75.0) |
+| `SHADOW_MAX_RISK_SCORE` | Shadow 전용 risk_score 상한 완화 | (기본 55.0) |
+| `SHADOW_AI_REVIEW_REQUIRED` | Shadow에서 AI 리뷰 우회 여부 | `true` |
+| `JWT_SECRET` | 최소 32자 랜덤 문자열 | (필수 입력) |
+| `JWT_REFRESH_SECRET` | 최소 32자 랜덤 문자열 (다른 값) | (필수 입력) |
+| `TELEGRAM_BOT_TOKEN` | 텔레그램 알림 발송용 | (선택) |
+| `STRIPE_SECRET_KEY` | 구독 결제 처리용 | (선택) |
+
+**시크릿 생성 예시:**
 
 ```bash
-# BINANCE_ENCRYPT_KEY / JWT_SECRET 생성 (각각 별도 실행)
 python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-**2단계 — 실행**
+---
+
+## 실행 방법
+
+### Shadow 스모크 테스트
+
+실제 주문을 내지 않는 Shadow 모드로 파이프라인을 1회 실행한다.
+`OPENAI_API_KEY`가 없어도 실행 가능하다 (AI 리뷰어가 fake stub으로 대체됨).
 
 ```bash
+# BTC 기본 픽스처 데이터로 실행
+python scripts/run_shadow_smoke.py
+
+# 결과 로그는 logs/shadow_smoke_decisions.jsonl 에 누적된다
+```
+
+### Shadow 성과 분석
+
+Decision 로그 JSONL을 분석해 요약 통계를 출력한다.
+
+```bash
+# 기본 (shadow_smoke_decisions.jsonl 분석)
+python scripts/analyze_shadow_performance.py logs/shadow_smoke_decisions.jsonl
+
+# 결과를 별도 파일로 저장
+python scripts/analyze_shadow_performance.py logs/shadow_smoke_decisions.jsonl -o results.json
+```
+
+분석 결과는 다음을 포함한다:
+- 전체 decision 수 / 실행된 가상 거래 수 / HOLD 비율
+- AI reject rate, 리스크 거절 코드 분포
+- 거절 단계별 분포 (decision / ai_review / risk / portfolio)
+- 시장 국면별·전략별·방향별 성과
+- 승률, Profit factor, Max drawdown, 수수료/슬리피지 반영 순손익
+- 경고: Net PnL ≤ 0, Profit factor < 1.2 등
+
+### OpenAI 연결 검증
+
+```bash
+python scripts/verify_openai.py
+# OPENAI_API_KEY, OPENAI_MODEL 환경변수를 읽어 LONG/SHORT/HOLD 시나리오를 테스트한다
+```
+
+### 전체 시스템 실행 (Docker)
+
+```bash
+cp .env.example .env  # 필요한 키 입력 후
+
 docker compose up -d
-```
+# Web 대시보드: http://localhost:3000
+# API 문서:     http://localhost:8000/docs
+# 모니터링:     http://localhost:3001  (admin / admin)
 
-처음 실행 시 2~3분 소요됩니다.
-
-**3단계 — 접속**
-
-| 서비스 | 주소 |
-|---|---|
-| 웹 대시보드 | http://localhost:3000 |
-| API 문서 | http://localhost:8000/docs |
-| 모니터링 | http://localhost:3001 (admin / admin) |
-
-```bash
-# 종료
 docker compose down
 ```
 
 ---
 
-## 환경변수 핵심 안내
+## 테스트 방법
 
-`.env.example`을 복사해서 `.env`를 만들어 사용합니다.
-`.env` 파일에는 API 키가 들어 있으므로 **절대 GitHub에 올리지 마세요.** (`.gitignore`에 등록됨)
-
-| 항목 | 설명 |
-|---|---|
-| `BINANCE_TESTNET=true` | 개발 중에는 반드시 `true`. 가상 자금으로만 거래됩니다. |
-| `LIVE_TRADING_ENABLED=false` | 실거래 전환 시에만 `true`로 변경합니다. |
-| `OPENAI_API_KEY` | GPT-5 분석 엔진 API Key |
-| `TELEGRAM_BOT_TOKEN` | @BotFather → `/newbot` → 토큰 복사 |
-| `STRIPE_SECRET_KEY` | dashboard.stripe.com → API Keys (테스트: `sk_test_...`) |
-
-> Binance Testnet API Key: https://testnet.binancefuture.com → 계정 → API Key
-> 읽기 + 거래 권한만 선택. **출금 권한은 절대 체크하지 마세요.**
-
----
-
-## 자주 묻는 질문
-
-**실제 돈으로 거래가 되나요?**
-
-기본 설정(`BINANCE_TESTNET=true`, `LIVE_TRADING_ENABLED=false`)에서는 가상 자금으로만 거래됩니다. Shadow Mode를 먼저 사용해 AI 성과를 충분히 확인한 뒤 실거래로 전환하는 것을 권장합니다.
-
----
-
-**수익을 보장하나요?**
-
-아닙니다. AI는 확률적으로 유리한 시점을 찾는 것이지 수익을 보장하지 않습니다. 암호화폐 선물 거래는 원금 전액 손실이 가능한 고위험 투자입니다.
-
----
-
-**Shadow Mode와 실거래의 차이가 뭔가요?**
-
-분석·판단 과정은 완전히 동일합니다. 차이는 마지막 단계 하나입니다. 실거래는 Binance에 실제 주문을 냅니다. Shadow Mode는 그 주문을 가상으로만 기록하고 성과를 추적합니다.
-
----
-
-**자동매매를 언제든 멈출 수 있나요?**
-
-네. 대시보드에서 즉시 중단할 수 있습니다. 또한 손실이 설정한 한도에 도달하거나, 청산 위험이 감지되거나, 거래소 API가 끊기면 시스템이 자동으로 멈춥니다.
-
----
-
-**API Key가 유출되면 어떻게 되나요?**
-
-이 서비스는 출금 권한이 없는 Key만 등록을 허용합니다. 유출되더라도 거래소 자금이 외부로 출금되는 것은 불가능합니다. Key는 암호화된 형태로 저장되며, 주문 실행 직전에만 잠깐 복호화되고 즉시 메모리에서 삭제됩니다.
-
----
-
-**어떤 코인을 거래하나요?**
-
-현재 BTC(비트코인)와 ETH(이더리움) 선물을 지원합니다.
-
----
-
-## 기술 스택
-
-| 분류 | 사용 기술 | 역할 |
-|---|---|---|
-| 웹 화면 | Next.js 14, TypeScript, Tailwind CSS | 대시보드 UI |
-| 차트 | TradingView Lightweight Charts | 실시간 가격 차트 |
-| 백엔드 | FastAPI (Python 3.12) | API 서버 |
-| AI 판단 | OpenAI GPT-5 | 매매 방향 결정 |
-| AI 파이프라인 | LangGraph | 5개 에이전트 오케스트레이션 |
-| 기술 지표 | pandas-ta | RSI, MACD, 볼린저 밴드 등 |
-| 감성 분석 | FinBERT | 뉴스 긍/부정 점수 |
-| 주 데이터베이스 | PostgreSQL 16 | 사용자·주문·포지션 저장 |
-| 시계열 데이터 | TimescaleDB | 캔들 데이터 저장 |
-| 캐시·큐 | Redis 7.2 | 세션, 캐시, 메시지 브로커 |
-| 백그라운드 작업 | Celery | 분석 스케줄링 |
-| 결제 | Stripe | 구독 관리 |
-| 알림 | Telegram Bot API | 실시간 알림 |
-| 컨테이너 | Docker Compose | 개발·배포 환경 |
-| 모니터링 | Grafana + Prometheus | 시스템 상태 모니터링 |
-
----
-
-## 개발 현황
-
-| 항목 | 상태 |
-|---|---|
-| 회원가입·로그인 (이메일 + 2FA) | ✅ 완료 |
-| Binance API 연동 (Testnet / Live) | ✅ 완료 |
-| AI 5단계 분석 파이프라인 | ✅ 완료 |
-| 자동 주문 실행 + TP/SL 자동 설정 | ✅ 완료 |
-| 긴급 청산 프로토콜 | ✅ 완료 |
-| 킬스위치 (일일·주간 손실 한도) | ✅ 완료 |
-| 정확한 실현 손익 계산 | ✅ 완료 |
-| **Shadow Trading Mode** | ✅ 완료 |
-| 텔레그램 알림 5종 | ✅ 완료 |
-| 거래 일지 자동 기록 | ✅ 완료 |
-| Stripe 구독 결제 | ✅ 완료 |
-| 웹 대시보드 | ✅ 완료 |
-| 최종 QA 및 베타 테스트 | 🔄 진행 중 |
-
----
-
----
-
-## Developer Reference
-
-> This section is for contributors and operators. The sections above are end-user documentation.
-
-### Safety warning
-
-This software is **not financial advice** and **does not guarantee profit**. Cryptocurrency futures trading can result in total loss of capital. Always run shadow trading for at least two weeks and review performance data before enabling live trading.
-
----
-
-### Current architecture (Steps 1–17 refactor — 2026-06-12)
-
-**Deterministic decision + AI-as-reviewer. AI does not create signals.**
-
-```
-market_data → technical → strategy → decision → ai_review
-    → risk → final_decision → portfolio → position_manager → execution
-```
-
-| Layer | Component | Role |
-|---|---|---|
-| decision | `DecisionEngine` | Generates `TradeCandidate` deterministically |
-| ai_review | `ReviewerAgent` (GPT-5) | APPROVE / REJECT only — no numeric authority |
-| risk | `RiskEngine.validate_candidate` | Final safety gate (R:R, SL, loss limits, etc.) |
-| final_decision | `decide_final_action` | HOLD unless all three layers pass |
-| execution | `ExecutionEngine` or `ShadowExecutionEngine` | Real or paper order |
-
-For full details see [`docs/DECISION_FLOW.md`](docs/DECISION_FLOW.md).
-
----
-
-### Strategy types and R:R
-
-| Strategy | Decision-layer min R:R | Expected hold |
-|---|---|---|
-| SCALPING | 1.2 | 5 min |
-| INTRADAY | 1.5 | 30 min |
-| TREND_FOLLOWING | 2.0 | 120 min |
-| BREAKOUT | 2.0 | 60 min |
-
-The **RiskEngine enforces a hard minimum of 2.0** on all candidates, regardless of strategy. See [`docs/RISK_ENGINE.md`](docs/RISK_ENGINE.md).
-
----
-
-### Key environment variables
+### 에이전트 레이어 단위 테스트 (전체)
 
 ```bash
-# Copy .env.example → .env. Never commit .env.
-cp .env.example .env
+# 루트에서 실행
+python -m pytest tests/unit/agents/ --tb=short -v
 ```
 
-| Variable | Description |
-|---|---|
-| `OPENAI_API_KEY` | Required for ReviewerAgent (GPT-5 review step) |
-| `OPENAI_MODEL` | Model override. Default: `gpt-5`. Never hardcode in source. |
-| `BINANCE_ENCRYPT_KEY` | AES-256-GCM key for API key encryption. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"` |
-| `BINANCE_TESTNET` | `true` during development. Switch to `false` only after full shadow validation. |
-| `LIVE_TRADING_ENABLED` | `false` during shadow period. Flip to `true` only after completing the pre-live checklist. |
-| `SHADOW_TRADING_ENABLED` | `true` to activate shadow mode (virtual fills, no real orders). |
-| `JWT_SECRET` / `JWT_REFRESH_SECRET` | Unique 32+ char random strings. |
-| `TELEGRAM_BOT_TOKEN` | Required for alert notifications. |
-| `STRIPE_SECRET_KEY` | Required for subscription billing. |
-
----
-
-### Setup
-
-**Frontend only (no database required):**
+### Decision 관련 테스트
 
 ```bash
-cd frontend && npm install
-node mock-server.mjs &   # fake API
-npm run dev
-# Open http://localhost:3000  |  demo@trading.com / Demo1234!
+# DecisionEngine + StrategySelector + CandidateGenerator
+python -m pytest tests/unit/agents/test_decision_engine_strategy_candidates.py \
+                 tests/unit/agents/test_strategy_selector.py \
+                 tests/unit/agents/test_trade_candidate_generator.py -v
+
+# MarketRegime 분류
+python -m pytest tests/unit/agents/test_regime_classifier.py -v
+
+# FinalDecision
+python -m pytest tests/unit/agents/test_final_decision.py -v
 ```
 
-**Full system (Docker):**
+### AI Reviewer 테스트
 
 ```bash
-cp .env.example .env      # fill in OPENAI_API_KEY, keys above
-docker compose up -d      # ~2–3 min first run
-# Web:        http://localhost:3000
-# API docs:   http://localhost:8000/docs
-# Monitoring: http://localhost:3001  (admin / admin)
-docker compose down
+# ReviewerAgent (APPROVE/REJECT 로직, 플레이북 가드)
+python -m pytest tests/unit/agents/test_synthesis_reviewer.py -v
 ```
 
-**Backend tests only:**
+### RiskEngine 테스트
+
+```bash
+python -m pytest tests/unit/agents/test_risk_engine.py \
+                 tests/unit/agents/test_kill_switch.py \
+                 tests/unit/agents/test_position_sizing.py \
+                 tests/unit/agents/test_sizing_engine.py -v
+```
+
+### 전략 테스트
+
+```bash
+python -m pytest tests/unit/agents/test_strategy_engine.py \
+                 tests/unit/agents/test_strategy_breakout.py \
+                 tests/unit/agents/test_strategy_ema_trend.py \
+                 tests/unit/agents/test_strategy_rsi_reversal.py -v
+```
+
+### Orchestrator 파이프라인 테스트
+
+```bash
+python -m pytest tests/unit/agents/test_orchestrator_pipeline.py -v
+```
+
+### Shadow 테스트
+
+```bash
+python -m pytest tests/unit/agents/test_shadow_performance_analysis.py \
+                 tests/unit/agents/test_shadow_smoke_script.py -v
+```
+
+### 백엔드 단위 테스트 (backend/)
 
 ```bash
 cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+python -m pytest tests/unit/ --tb=short -v
 ```
 
----
-
-### Running key tests
+### Binance Testnet 통합 테스트
 
 ```bash
-# Full agents unit suite (533 tests)
-cd backend
-.venv/bin/python -m pytest tests/unit/agents/ --tb=short \
-  --noconftest --override-ini="addopts="
-
-# Decision flow only
-.venv/bin/python -m pytest tests/unit/agents/decision/ -v \
-  --noconftest --override-ini="addopts="
-
-# Pipeline + shadow logging
-.venv/bin/python -m pytest tests/unit/agents/test_orchestrator_pipeline.py -v \
-  --noconftest --override-ini="addopts="
-
-# Execution safety
-.venv/bin/python -m pytest tests/unit/agents/execution/ -v \
-  --noconftest --override-ini="addopts="
-
-# Emergency path integration tests
-.venv/bin/python -m pytest tests/unit/test_h03_on_trade_closed.py \
-  tests/unit/test_h04_tp_sl_failed.py tests/unit/test_m02_emergency_closed_hook.py \
-  tests/unit/test_m03_actual_pnl.py tests/unit/test_m04_emergency_closed_alert.py \
-  -v --noconftest --override-ini="addopts="
+# TESTNET_API_KEY / TESTNET_API_SECRET 환경변수 필요
+python -m pytest tests/integration/ -m testnet -v
 ```
 
 ---
 
-### Shadow performance analysis
+## 로그 및 산출물
 
-```bash
-# After shadow period: extract decision_log lines from app log
-python scripts/analyze_shadow_performance.py path/to/app.log
+### Shadow Decision JSONL (`logs/shadow_smoke_decisions.jsonl`)
 
-# Custom output file
-python scripts/analyze_shadow_performance.py path/to/app.log -o results.json
+파이프라인 1회 실행마다 1개의 JSON 오브젝트가 누적된다. 주요 필드:
+
+```
+timestamp, coin, symbol, market_price
+market_regime, chart_score, news_score, derivatives_score
+strategy_type, actual_rr, min_required_rr
+ai_review (review_action, confidence, critical_contradiction)
+risk_result (approved, failed_checks, rejection_reason)
+candidate_action, final_action, decision_outcome
+rejection_stage, rejection_reason
+leverage, stop_loss, take_profit, notional_size
+expected_net_profit, expected_net_loss
 ```
 
-See [`docs/SHADOW_TRADING.md`](docs/SHADOW_TRADING.md) for how to interpret results.
+### Shadow Summary JSON (`logs/shadow_smoke_summary.json`)
+
+`run_shadow_smoke.py` 실행 후 생성되는 요약 파일 (있을 경우).
+
+### Performance Summary (`shadow_performance_summary.json`)
+
+`analyze_shadow_performance.py` 실행 시 지정한 경로에 생성되는 machine-readable JSON.
 
 ---
 
-### Pre-live trading checklist
+## 주요 안전 규칙
 
-Complete every item in [`docs/LIVE_TRADING_CHECKLIST.md`](docs/LIVE_TRADING_CHECKLIST.md) before setting `LIVE_TRADING_ENABLED=true`.
+다음 규칙은 코드에서 우회할 수 없다 (`agents/decision/constants.py`, `agents/risk/`):
+
+```python
+REQUIRE_STOP_LOSS       = True    # SL 없는 주문 금지
+REQUIRE_TAKE_PROFIT     = True    # TP 없는 주문 금지
+ISOLATED_MARGIN_ONLY    = True    # Cross 마진 사용 금지
+CLOSE_IF_SL_TP_FAIL     = True    # TP/SL 설정 실패 시 긴급 청산
+ALLOW_MARTINGALE        = False   # 마틴게일 전략 금지
+ALLOW_AVERAGING_DOWN    = False   # 물타기 금지
+
+GLOBAL_MIN_RISK_REWARD_RATIO = 2.0   # 최소 R:R 2.0 (Decision 레이어 사전 필터)
+# RiskEngine(agents/risk/)의 MIN_RR_RATIO = 2.0 이 최종 강제 게이트
+
+DECISION_MAX_LEVERAGE         = 10   # 의사결정 레이어 레버리지 상한
+DECISION_MAX_DAILY_LOSS_PCT   = 0.03 # 일일 손실 한도 3%
+DECISION_MAX_WEEKLY_LOSS_PCT  = 0.08 # 주간 손실 한도 8%
+DECISION_MAX_CONSECUTIVE_LOSSES = 3  # 연속 손실 쿨다운
+DECISION_MAX_OPEN_POSITIONS   = 1    # 동시 오픈 포지션 상한
+
+HIGH_VOLATILITY_BLOCK = True   # 고변동성 국면 진입 차단
+NEWS_EVENT_BLOCK      = True   # 뉴스 이벤트 국면 진입 차단
+```
+
+**출금 권한 API Key는 등록을 차단한다.** 해킹 시에도 거래소 자금 출금이 불가능하다.
 
 ---
 
-### Known test / environment issues
+## 개발 원칙
 
-See [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) for:
-- `celery` not installed → shadow monitor tests skip
-- `websockets` not installed → market data tests fail
-- Wiring test `sys.modules` pollution
-- SCALPING/INTRADAY R:R vs RiskEngine minimum (design trade-off)
-- `OpenAIClient` in deprecated `agents/analyst/` (migration TODO)
+1. **최소 변경 원칙** — 기존 pipeline behavior와 인터페이스를 보존한다.
+2. **결정적 규칙 우선** — AI reviewer는 보조적 역할. 결정적 `RiskEngine`과 `DecisionEngine`이 우선이다.
+3. **불확실성 = HOLD** — 어떤 예외도 HOLD/REJECT로 귀결된다. APPROVE로 새어나가지 않는다.
+4. **테스트 커버리지** — 주문 실행 경로 95% 이상, AI 에이전트 85% 이상.
+5. **Binance 통합 테스트는 Testnet에서만** — 메인넷 연결 금지.
+6. **코인별 독립 검토** — 여러 코인을 지원하더라도, 각 코인의 시장 국면과 리스크를 독립적으로 검토한다.
 
 ---
 
-### Documentation index
+## 문서 인덱스
 
-| File | Contents |
+| 파일 | 내용 |
 |---|---|
-| [`docs/DECISION_FLOW.md`](docs/DECISION_FLOW.md) | 10-step pipeline, DecisionEngine, AI reviewer, FinalDecision |
-| [`docs/RISK_ENGINE.md`](docs/RISK_ENGINE.md) | Safety checks, sizing formula, kill switch, emergency close |
-| [`docs/SHADOW_TRADING.md`](docs/SHADOW_TRADING.md) | Shadow mode setup, performance analysis |
-| [`docs/LIVE_TRADING_CHECKLIST.md`](docs/LIVE_TRADING_CHECKLIST.md) | Pre-live verification steps |
-| [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) | Environment issues and design trade-offs |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Full system architecture (frontend, backend, DB, queues) |
-| [`AGENTS.md`](AGENTS.md) | Agent design details |
-| [`TRADING_RULES.md`](TRADING_RULES.md) | Risk rule reference (1:1 with RiskEngine code) |
-| [`CLAUDE.md`](CLAUDE.md) | Absolute development rules (CTO authority) |
+| [`docs/DECISION_FLOW.md`](docs/DECISION_FLOW.md) | 10단계 파이프라인 상세, DecisionEngine, AI reviewer, FinalDecision |
+| [`docs/RISK_ENGINE.md`](docs/RISK_ENGINE.md) | 안전 규칙, 포지션 사이징 공식, KillSwitch, 긴급 청산 |
+| [`docs/SHADOW_TRADING.md`](docs/SHADOW_TRADING.md) | Shadow 모드 설정, 성과 분석 결과 해석 방법 |
+| [`docs/LIVE_TRADING_CHECKLIST.md`](docs/LIVE_TRADING_CHECKLIST.md) | 실거래 전환 전 필수 확인 항목 |
+| [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) | 환경 이슈, 설계 트레이드오프 |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 전체 시스템 아키텍처 (frontend, backend, DB, queue) |
+| [`AGENTS.md`](AGENTS.md) | 에이전트 설계 상세 |
+| [`TRADING_RULES.md`](TRADING_RULES.md) | 리스크 규칙 레퍼런스 (RiskEngine 코드와 1:1 대응) |
+| [`CLAUDE.md`](CLAUDE.md) | 개발 절대 규칙 (CTO 권한) |
 
 ---
 

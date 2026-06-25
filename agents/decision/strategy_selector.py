@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from agents.decision.constants import (
+    REGIME_ALLOWED_STRATEGIES,
     STRATEGY_HOLDING_MINUTES,
     STRATEGY_MAX_BREAKOUT_PRICE_MOVE,
     STRATEGY_MAX_RISK_FOR_BREAKOUT,
@@ -128,6 +129,39 @@ def _price_change_abs_pct(market_data: dict | None) -> float:
         "price_change_1h_pct",
         default=0.0,
     ))
+
+
+def _strategy_key(strategy_name: Any) -> str:
+    value = getattr(strategy_name, "strategy_type", strategy_name)
+    value = getattr(value, "value", value)
+    if value is None:
+        return "UNKNOWN"
+    key = str(value).strip().upper()
+    aliases = {
+        "TREND": "TREND_FOLLOWING",
+        "TREND_PULLBACK_LONG": "TREND_PULLBACK",
+        "TREND_PULLBACK_SHORT": "TREND_PULLBACK",
+        "PULLBACK": "TREND_PULLBACK",
+        "BREAKOUT_RETEST_LONG": "BREAKOUT_RETEST",
+        "BREAKOUT_RETEST_SHORT": "BREAKOUT_RETEST",
+        "RETEST": "BREAKOUT_RETEST",
+        "RANGE_MEAN_REVERSION": "MEAN_REVERSION",
+        "MEAN_REVERSION_LONG": "MEAN_REVERSION",
+        "MEAN_REVERSION_SHORT": "MEAN_REVERSION",
+    }
+    return aliases.get(key, key)
+
+
+def get_allowed_strategies_for_regime(market_regime: Any) -> tuple[str, ...]:
+    """시장 국면별 허용 전략 목록을 반환한다. UNKNOWN은 보수적으로 빈 목록."""
+    regime = _as_regime(market_regime)
+    return REGIME_ALLOWED_STRATEGIES.get(regime.value, REGIME_ALLOWED_STRATEGIES["UNKNOWN"])
+
+
+def is_strategy_allowed_for_regime(strategy_name: Any, market_regime: Any) -> bool:
+    """후보 전략이 현재 시장 국면 플레이북에서 허용되는지 확인한다."""
+    strategy = _strategy_key(strategy_name)
+    return strategy in get_allowed_strategies_for_regime(market_regime)
 
 
 # ── 결과 생성 헬퍼 ────────────────────────────────────────────────────────────

@@ -151,6 +151,7 @@ def test_unknown_strategy_returns_hold() -> None:
     result = _candidate(selection=_selection(StrategyType.UNKNOWN, minutes=0, rr=0.0))
 
     assert result.action == FinalAction.HOLD
+    assert any("리스크" in reason for reason in result.reasons)
     assert result.stop_loss is None
     assert result.take_profit is None
 
@@ -171,7 +172,28 @@ def test_high_risk_score_returns_hold() -> None:
     )
 
     assert result.action == FinalAction.HOLD
-    assert any("리스크" in reason for reason in result.reasons)
+
+
+def test_shadow_threshold_profile_can_relax_scores_for_virtual_trades() -> None:
+    live_default = _candidate(
+        chart=_chart(long=62.0, risk=40.0),
+        news=_news(risk=30.0),
+        deriv=_deriv(risk=30.0),
+        config=None,
+    )
+    shadow_profile = _candidate(
+        chart=_chart(long=62.0, risk=40.0),
+        news=_news(risk=30.0),
+        deriv=_deriv(risk=30.0),
+        config={
+            "min_long_score": 60.0,
+            "min_short_score": 60.0,
+            "max_risk_score": 45.0,
+        },
+    )
+
+    assert live_default.action == FinalAction.HOLD
+    assert shadow_profile.action == FinalAction.LONG
 
 
 def test_strong_long_score_creates_long_candidate() -> None:

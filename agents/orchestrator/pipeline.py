@@ -285,12 +285,14 @@ class OrchestratorPipeline:
         async def _log_decision(
             rejection_reason: str | None = None,
             execution_result: Any = None,
+            rejection_stage: str | None = None,
         ) -> None:
             payload = _build_decision_log_payload(
                 ctx=ctx,
                 symbol=symbol,
                 rejection_reason=rejection_reason,
                 execution_result=execution_result,
+                rejection_stage=rejection_stage,
             )
             await self._logger.log_decision(ctx.run_id, payload)
 
@@ -301,6 +303,7 @@ class OrchestratorPipeline:
         )
         if r1.failed:
             ctx.errors.append({"agent": "market_data", "error": r1.error})
+            await _log_decision("MarketData 수집 실패", rejection_stage="market_data")
             return _finish(
                 PipelineStatus.FAILED,
                 rejection_reason="MarketData 수집 실패",
@@ -365,6 +368,7 @@ class OrchestratorPipeline:
             # 분류/점수/후보생성 예외 → 안전하게 HOLD
             ctx.errors.append({"agent": "decision", "error": r4.error})
             logger.warning("[pipeline] decision 실패 — HOLD: %s", r4.error)
+            await _log_decision("결정 단계 오류 — HOLD", rejection_stage="decision")
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason="결정 단계 오류 — HOLD",
@@ -377,7 +381,7 @@ class OrchestratorPipeline:
         from agents.decision.models import FinalAction
         if candidate is None or candidate.action == FinalAction.HOLD:
             reason = _candidate_hold_reason(candidate)
-            await _log_decision(reason)
+            await _log_decision(reason, rejection_stage="decision")
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason=reason,
@@ -385,32 +389,40 @@ class OrchestratorPipeline:
             )
 
         # ── Step 5: AI Reviewer (검토 전용) ───────────────────────────────────
-        review_input = _build_review_input(symbol, ctx.decision_result, candidate)
-        r5 = await _run_step(
-            "ai_review",
-            lambda: self._deps.reviewer.review(review_input),
-        )
         from agents.decision.models import AIReviewAction
-        if r5.failed:
-            # API 오류 등 — 안전 REJECT로 처리하고 HOLD
-            ctx.errors.append({"agent": "ai_review", "error": r5.error})
-            ctx.ai_review = _safe_reject_review(r5.error or "ai_review_failed")
-            logger.warning("[pipeline] ai_review 실패 — 안전 REJECT/HOLD: %s", r5.error)
-            await _log_decision("AI 리뷰 실패 — 안전 REJECT")
-            return _finish(
-                PipelineStatus.HOLD,
-                rejection_reason="AI 리뷰 실패 — 안전 REJECT",
-                skip=_STEP_NAMES[5:],
+        if not _ai_review_required(getattr(inp, "decision_config", None)):
+            _append_skipped(
+                steps,
+                ["ai_review"],
+                reason="shadow ai_review_required=false",
             )
-        ctx.ai_review = r5.output
-        if _review_action(ctx.ai_review) == AIReviewAction.REJECT:
-            reason = getattr(ctx.ai_review, "reason_summary", "") or "AI reviewer rejected candidate"
-            await _log_decision(reason)
-            return _finish(
-                PipelineStatus.HOLD,
-                rejection_reason=reason,
-                skip=_STEP_NAMES[5:],
+            ctx.ai_review = _shadow_ai_review_skipped()
+        else:
+            review_input = _build_review_input(symbol, ctx.decision_result, candidate)
+            r5 = await _run_step(
+                "ai_review",
+                lambda: self._deps.reviewer.review(review_input),
             )
+            if r5.failed:
+                # API 오류 등 — 안전 REJECT로 처리하고 HOLD
+                ctx.errors.append({"agent": "ai_review", "error": r5.error})
+                ctx.ai_review = _safe_reject_review(r5.error or "ai_review_failed")
+                logger.warning("[pipeline] ai_review 실패 — 안전 REJECT/HOLD: %s", r5.error)
+                await _log_decision("AI 리뷰 실패 — 안전 REJECT", rejection_stage="ai_review")
+                return _finish(
+                    PipelineStatus.HOLD,
+                    rejection_reason="AI 리뷰 실패 — 안전 REJECT",
+                    skip=_STEP_NAMES[5:],
+                )
+            ctx.ai_review = r5.output
+            if _review_action(ctx.ai_review) == AIReviewAction.REJECT:
+                reason = getattr(ctx.ai_review, "reason_summary", "") or "AI reviewer rejected candidate"
+                await _log_decision(reason, rejection_stage="ai_review")
+                return _finish(
+                    PipelineStatus.HOLD,
+                    rejection_reason=reason,
+                    skip=_STEP_NAMES[5:],
+                )
 
         # ── RawSignal 생성 (legacy PositionManager / Execution 입력) ──────────
         raw_signal = _build_raw_signal_from_candidate(
@@ -441,7 +453,7 @@ class OrchestratorPipeline:
             # RiskEngine 예외 → 보수적으로 HOLD (실행 없음)
             ctx.errors.append({"agent": "risk", "error": r6.error})
             logger.warning("[pipeline] risk 예외 — HOLD: %s", r6.error)
-            await _log_decision("RiskEngine 예외 — 보수적 HOLD")
+            await _log_decision("RiskEngine 예외 — 보수적 HOLD", rejection_stage="risk")
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason="RiskEngine 예외 — 보수적 HOLD",
@@ -455,7 +467,7 @@ class OrchestratorPipeline:
                 "[pipeline] risk 거부 user=%s coin=%s failed_checks=%s reason=%s",
                 inp.user_id, inp.coin, failed_checks, reason,
             )
-            await _log_decision(reason)
+            await _log_decision(reason, rejection_stage="risk")
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason=reason,
@@ -477,6 +489,7 @@ class OrchestratorPipeline:
         if r7.failed:
             ctx.errors.append({"agent": "final_decision", "error": r7.error})
             logger.warning("[pipeline] final_decision 예외 — HOLD: %s", r7.error)
+            await _log_decision("최종 결정 단계 오류 — HOLD", rejection_stage="final_decision")
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason="최종 결정 단계 오류 — HOLD",
@@ -484,7 +497,10 @@ class OrchestratorPipeline:
             )
         ctx.final_decision = r7.output
         if ctx.final_decision.action == FinalAction.HOLD:
-            await _log_decision(ctx.final_decision.reason)
+            await _log_decision(
+                ctx.final_decision.reason,
+                rejection_stage="final_decision",
+            )
             return _finish(
                 PipelineStatus.HOLD,
                 rejection_reason=ctx.final_decision.reason,
@@ -504,7 +520,10 @@ class OrchestratorPipeline:
         )
         if r8.failed:
             ctx.errors.append({"agent": "portfolio", "error": r8.error})
-            await _log_decision("PortfolioManager 실패 — 보수적 거부")
+            await _log_decision(
+                "PortfolioManager 실패 — 보수적 거부",
+                rejection_stage="portfolio",
+            )
             return _finish(
                 PipelineStatus.REJECTED,
                 rejection_reason="PortfolioManager 실패 — 보수적 거부",
@@ -513,7 +532,7 @@ class OrchestratorPipeline:
         can_add, portfolio_reason = r8.output  # (bool, str)
         ctx.portfolio_check = r8.output
         if not can_add:
-            await _log_decision(portfolio_reason)
+            await _log_decision(portfolio_reason, rejection_stage="portfolio")
             return _finish(
                 PipelineStatus.REJECTED,
                 rejection_reason=portfolio_reason,
@@ -533,7 +552,10 @@ class OrchestratorPipeline:
         )
         if r9.failed:
             ctx.errors.append({"agent": "position_manager", "error": r9.error})
-            await _log_decision("PositionManager 실패")
+            await _log_decision(
+                "PositionManager 실패",
+                rejection_stage="position_manager",
+            )
             return _finish(
                 PipelineStatus.FAILED,
                 rejection_reason="PositionManager 실패",
@@ -563,7 +585,7 @@ class OrchestratorPipeline:
         )
         if r10.failed:
             ctx.errors.append({"agent": "execution", "error": r10.error})
-            await _log_decision("주문 실행 실패")
+            await _log_decision("주문 실행 실패", rejection_stage="execution")
             return _finish(PipelineStatus.FAILED, rejection_reason="주문 실행 실패")
         ctx.execution_result = r10.output
         er = ctx.execution_result
@@ -578,7 +600,11 @@ class OrchestratorPipeline:
                 inp.user_id, inp.coin,
                 getattr(getattr(er, "entry_order", None), "exchange_order_id", "N/A"),
             )
-            await _log_decision("TP/SL 실패 + 긴급 청산 실패 — 수동 개입 필요", er)
+            await _log_decision(
+                "TP/SL 실패 + 긴급 청산 실패 — 수동 개입 필요",
+                er,
+                rejection_stage="execution",
+            )
             return _finish(
                 PipelineStatus.FAILED,
                 rejection_reason="TP/SL 실패 + 긴급 청산 실패 — 수동 개입 필요",
@@ -595,7 +621,11 @@ class OrchestratorPipeline:
                 await _fire_post_trade_hook(self._deps.post_trade_hook, inp, ctx)
             if self._deps.alert_dispatcher is not None:
                 await _fire_emergency_alert(self._deps.alert_dispatcher, inp, ctx)
-            await _log_decision("TP/SL 설정 실패 — 긴급 청산 완료", er)
+            await _log_decision(
+                "TP/SL 설정 실패 — 긴급 청산 완료",
+                er,
+                rejection_stage="execution",
+            )
             return _finish(
                 PipelineStatus.EMERGENCY_CLOSED,
                 rejection_reason="TP/SL 설정 실패 — 긴급 청산 완료",
@@ -634,6 +664,26 @@ def _candidate_hold_reason(candidate: Any) -> str:
 
 def _review_action(ai_review: Any) -> Any:
     return getattr(ai_review, "review_action", None)
+
+
+def _ai_review_required(config: Any) -> bool:
+    if config is None:
+        return True
+    if isinstance(config, dict):
+        return bool(config.get("ai_review_required", True))
+    return bool(getattr(config, "ai_review_required", True))
+
+
+def _shadow_ai_review_skipped() -> Any:
+    """Shadow sampling 전용 AI review bypass 결과."""
+    from agents.decision.models import AIReviewAction, AIReviewResult
+    return AIReviewResult(
+        review_action=AIReviewAction.APPROVE,
+        confidence=1.0,
+        critical_contradiction=False,
+        risk_warnings=["shadow_ai_review_skipped"],
+        reason_summary="Shadow mode ai_review_required=false — deterministic bypass",
+    )
 
 
 def _safe_reject_review(error: str) -> Any:
@@ -683,7 +733,10 @@ def _build_review_input(symbol: str, decision_result: Any, candidate: Any) -> An
         deriv_risk_score=float(getattr(deriv, "risk_score", 0.0) or 0.0),
         deriv_crowded_side=str(getattr(deriv, "crowded_side", "NONE") or "NONE"),
         deriv_reasons=list(getattr(deriv, "reasons", []) or []),
-        strategy_type=getattr(candidate.strategy_type, "value", "UNKNOWN"),
+        strategy_type=(
+            getattr(candidate, "strategy_name", None)
+            or getattr(candidate.strategy_type, "value", "UNKNOWN")
+        ),
         expected_holding_minutes=int(candidate.expected_holding_minutes or 0),
         action=getattr(candidate.action, "value", "HOLD"),
         entry_price=_f(candidate.entry_price) or 0.0,
@@ -774,6 +827,7 @@ def _build_decision_log_payload(
     symbol: str,
     rejection_reason: str | None,
     execution_result: Any = None,
+    rejection_stage: str | None = None,
 ) -> dict[str, Any]:
     """TradeCandidate / FinalDecision 전체 맥락을 JSON-compatible dict로 변환."""
     candidate = ctx.candidate
@@ -796,10 +850,20 @@ def _build_decision_log_payload(
     ai_reason = getattr(ai_review, "reason_summary", None)
     if rejection_reason is None and final_action == "HOLD":
         rejection_reason = getattr(final_decision, "reason", None) or ai_reason
+    if rejection_stage is None and rejection_reason is not None:
+        rejection_stage = _infer_rejection_stage(final_action, rejection_reason)
+
+    decision_outcome = _decision_outcome(
+        final_action=final_action,
+        rejection_stage=rejection_stage,
+        rejection_reason=rejection_reason,
+        execution_result=execution_result,
+    )
 
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "coin": ctx.coin,
+        "user_id": ctx.user_id,
         "symbol": getattr(candidate, "symbol", symbol) if candidate is not None else symbol,
         "market_price": _primitive(snap.get("current_price") or snap.get("price")),
         "signal_price": _primitive(getattr(raw_signal, "entry_price", None)),
@@ -811,7 +875,10 @@ def _build_decision_log_payload(
         "chart_score": _primitive(getattr(decision, "chart_score", None)),
         "news_score": _primitive(getattr(decision, "news_score", None)),
         "derivatives_score": _primitive(getattr(decision, "derivatives_score", None)),
-        "strategy_type": _enum_value(getattr(candidate, "strategy_type", None)),
+        "strategy_type": (
+            _primitive(getattr(candidate, "strategy_name", None))
+            or _enum_value(getattr(candidate, "strategy_type", None))
+        ),
         "expected_holding_minutes": _primitive(
             getattr(candidate, "expected_holding_minutes", None)
         ),
@@ -823,6 +890,8 @@ def _build_decision_log_payload(
         "risk_warnings": risk_warnings,
         "candidate_action": candidate_action,
         "final_action": final_action,
+        "decision_outcome": decision_outcome,
+        "rejection_stage": rejection_stage,
         "rejection_reason": rejection_reason,
         "leverage": _primitive(getattr(candidate, "leverage", None)),
         "margin_ratio": _primitive(getattr(candidate, "margin_ratio", None)),
@@ -850,6 +919,49 @@ def _build_decision_log_payload(
         "holding_time": None,
         "funding_cost": _primitive(snap.get("funding_cost")),
     }
+
+
+def _infer_rejection_stage(final_action: str, rejection_reason: str) -> str:
+    reason = rejection_reason.lower()
+    if "ai" in reason or "review" in reason:
+        return "ai_review"
+    if "risk" in reason or "order_" in reason:
+        return "risk"
+    if "portfolio" in reason or "포트폴리오" in rejection_reason:
+        return "portfolio"
+    if "positionmanager" in reason:
+        return "position_manager"
+    if "주문" in rejection_reason or "tp/sl" in reason:
+        return "execution"
+    if final_action == "HOLD":
+        return "decision"
+    return "unknown"
+
+
+def _decision_outcome(
+    *,
+    final_action: str,
+    rejection_stage: str | None,
+    rejection_reason: str | None,
+    execution_result: Any = None,
+) -> str:
+    if execution_result is not None and getattr(execution_result, "executed", False):
+        if getattr(execution_result, "emergency_close_failed", False):
+            return "EXECUTION_FAILED"
+        if getattr(execution_result, "tp_sl_failed", False):
+            return "EXECUTION_EMERGENCY_CLOSED"
+        return "EXECUTED"
+    if rejection_stage == "ai_review":
+        return "AI_REJECT"
+    if rejection_stage == "risk":
+        return "RISK_REJECT"
+    if rejection_stage == "portfolio":
+        return "PORTFOLIO_REJECT"
+    if rejection_stage in {"position_manager", "execution"}:
+        return "EXECUTION_FAILED"
+    if final_action == "HOLD" or rejection_reason is not None:
+        return "HOLD"
+    return final_action or "UNKNOWN"
 
 
 def _primitive(value: Any) -> Any:
@@ -916,6 +1028,7 @@ def _actual_result(execution_result: Any) -> dict[str, Any] | None:
         ),
         "entry_fill_price": _primitive(getattr(entry, "avg_fill_price", None)),
         "entry_quantity": _primitive(getattr(entry, "quantity", None)),
+        "entry_exchange_order_id": _primitive(getattr(entry, "exchange_order_id", None)),
         "emergency_fill_price": _primitive(getattr(emergency, "avg_fill_price", None)),
     }
 

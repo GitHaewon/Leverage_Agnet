@@ -24,7 +24,10 @@ from agents.decision.chart_signals import score_chart_signals
 from agents.decision.derivatives_market import score_derivatives_market
 from agents.decision.news_sentiment import score_news_sentiment
 from agents.decision.regime import classify_market_regime
+from agents.decision.constants import STRATEGY_HOLDING_MINUTES, STRATEGY_MIN_RR
+from agents.decision.models import StrategySelectionResult, StrategyType
 from agents.decision.strategy_selector import select_strategy_type
+from agents.strategy.engine import build_strategy_candidates
 
 
 @dataclass
@@ -36,6 +39,8 @@ class DecisionResult:
     derivatives_score: Any      # DerivativesMarketScore
     strategy_selection: Any     # StrategySelectionResult
     candidate: Any              # TradeCandidate
+    strategy_candidates: list[Any] = field(default_factory=list)
+    selected_strategy_candidate: Any | None = None
     confidence: float = 0.0     # 차트 우세 점수 기반 결정적 신뢰도 (0.0~1.0)
     reasons: list[str] = field(default_factory=list)
 
@@ -91,6 +96,49 @@ def _extract_price_data(market_snapshot: Any) -> dict:
     }
 
 
+def _strategy_candidates(strategy_signal: Any, regime: Any) -> list[Any]:
+    candidates = _get(strategy_signal, "candidates", None)
+    if candidates:
+        return [
+            c for c in candidates
+            if _candidate_allowed(c, regime)
+        ]
+    signals = list(_get(strategy_signal, "all_signals", []) or [])
+    if not signals:
+        return []
+    return build_strategy_candidates(signals, regime)
+
+
+def _candidate_allowed(candidate: Any, regime: Any) -> bool:
+    from agents.decision.strategy_selector import is_strategy_allowed_for_regime
+    return is_strategy_allowed_for_regime(_get(candidate, "strategy_name"), regime)
+
+
+def _candidate_strategy_type(candidate: Any) -> StrategyType:
+    name = str(_get(candidate, "strategy_name", "") or "").upper()
+    if "BREAKOUT" in name:
+        return StrategyType.BREAKOUT
+    if "SCALPING" in name:
+        return StrategyType.SCALPING
+    if "MEAN_REVERSION" in name or "RSI_REVERSAL" in name:
+        return StrategyType.INTRADAY
+    if "TREND" in name:
+        return StrategyType.TREND_FOLLOWING
+    return StrategyType.UNKNOWN
+
+
+def _selection_from_candidate(candidate: Any) -> StrategySelectionResult:
+    strategy_type = _candidate_strategy_type(candidate)
+    name = str(_get(candidate, "strategy_name", strategy_type.value) or strategy_type.value)
+    min_rr = STRATEGY_MIN_RR.get(name, STRATEGY_MIN_RR.get(strategy_type.value, 2.0))
+    return StrategySelectionResult(
+        strategy_type=strategy_type,
+        expected_holding_minutes=STRATEGY_HOLDING_MINUTES.get(strategy_type.value, 0),
+        min_required_rr=float(min_rr),
+        reasons=[f"StrategyCandidate selected: {name}"],
+    )
+
+
 class DecisionEngine:
     """결정적 의사결정 체인을 실행하는 순수 엔진 (의존성 주입용)."""
 
@@ -126,12 +174,17 @@ class DecisionEngine:
         strategy_selection = select_strategy_type(
             regime, chart_score, news_score, derivatives_score, market_snapshot, config
         )
+        candidates = _strategy_candidates(strategy_signal, regime)
+        selected_candidate = candidates[0] if candidates else None
+        candidate_strategy_signal = selected_candidate or strategy_signal
+        if selected_candidate is not None:
+            strategy_selection = _selection_from_candidate(selected_candidate)
         candidate = generate_trade_candidate(
             coin,
             symbol,
             market_snapshot,
             technical_result,
-            strategy_signal,
+            candidate_strategy_signal,
             regime,
             chart_score,
             news_score,
@@ -152,6 +205,8 @@ class DecisionEngine:
             derivatives_score=derivatives_score,
             strategy_selection=strategy_selection,
             candidate=candidate,
+            strategy_candidates=candidates,
+            selected_strategy_candidate=selected_candidate,
             confidence=confidence,
             reasons=list(getattr(candidate, "reasons", []) or []),
         )

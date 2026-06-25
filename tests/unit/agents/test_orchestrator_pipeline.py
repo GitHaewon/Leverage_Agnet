@@ -64,6 +64,11 @@ def _pipeline_with_storage(deps) -> tuple[OrchestratorPipeline, InMemoryLogStora
     return pipeline, storage
 
 
+class FailingDecisionLogStorage(InMemoryLogStorage):
+    async def save_decision_log(self, run_id: str, payload: dict) -> None:
+        raise RuntimeError("shadow_decision db unavailable")
+
+
 # ── 1 & 2. 정상 실행 경로 (LONG / SHORT) ──────────────────────────────────────
 
 class TestExecutionPathAllowed:
@@ -369,6 +374,23 @@ class TestShadowMode:
         await _pipeline(deps).run(make_input())
         assert shadow.call_count == 0
 
+    @pytest.mark.asyncio
+    async def test_shadow_config_can_skip_ai_review(self) -> None:
+        reviewer = MockReviewerProvider(result=make_review(AIReviewAction.REJECT))
+        execution = MockShadowExecutionProvider()
+        deps = make_deps(
+            reviewer=reviewer,
+            risk=MockRiskProvider(result=MockValidationResult(approved=True)),
+            execution=execution,
+        )
+        inp = make_input()
+        inp.decision_config = {"profile": "shadow", "ai_review_required": False}
+        result = await _pipeline(deps).run(inp)
+
+        assert result.status == PipelineStatus.COMPLETED
+        assert reviewer.call_count == 0
+        assert execution.call_count == 1
+
 
 # ── 10. 결정 로그 / Shadow 의사결정 기록 ─────────────────────────────────────
 
@@ -390,6 +412,9 @@ class TestDecisionLogs:
         assert logs[0]["coin"] == "BTC"
         assert logs[0]["symbol"] == "BTCUSDT"
         assert logs[0]["expected_entry_price"] == 67000.0
+        assert logs[0]["decision_outcome"] == "EXECUTED"
+        assert logs[0]["rejection_stage"] is None
+        assert logs[0]["rejection_reason"] is None
 
     @pytest.mark.asyncio
     async def test_short_candidate_decision_is_logged(self) -> None:
@@ -419,6 +444,8 @@ class TestDecisionLogs:
         log = storage.get_decision_logs(result.run_id)[0]
         assert log["final_action"] == "HOLD"
         assert log["rejection_reason"] == "candidate HOLD"
+        assert log["rejection_stage"] == "decision"
+        assert log["decision_outcome"] == "HOLD"
         assert log["expected_fees"] == 0.0
 
     @pytest.mark.asyncio
@@ -433,6 +460,8 @@ class TestDecisionLogs:
         assert log["candidate_action"] == "LONG"
         assert log["final_action"] == "HOLD"
         assert log["rejection_reason"] == "AI reviewer rejected noisy setup"
+        assert log["rejection_stage"] == "ai_review"
+        assert log["decision_outcome"] == "AI_REJECT"
         assert log["ai_review"]["review_action"] == "REJECT"
 
     @pytest.mark.asyncio
@@ -462,6 +491,8 @@ class TestDecisionLogs:
 
         log = storage.get_decision_logs(result.run_id)[0]
         assert log["rejection_reason"] == "risk blocked"
+        assert log["rejection_stage"] == "risk"
+        assert log["decision_outcome"] == "RISK_REJECT"
         assert log["risk_failed_checks"] == ["ORDER_001", "SPREAD_TOO_HIGH"]
         assert log["risk_warnings"] == ["risk warning"]
 
@@ -516,7 +547,67 @@ class TestDecisionLogs:
         assert shadow.real_orders_placed == 0
         assert result.execution_result.placed_real_order is False
         assert log["final_action"] == "LONG"
+        assert log["decision_outcome"] == "EXECUTED"
         assert log["actual_result"]["mode"] == "shadow"
+
+    @pytest.mark.asyncio
+    async def test_portfolio_reject_outcome_is_logged(self) -> None:
+        deps = make_deps(
+            reviewer=MockReviewerProvider(result=make_review(AIReviewAction.APPROVE)),
+            risk=MockRiskProvider(result=MockValidationResult(approved=True)),
+            portfolio=MockPortfolioProvider(can_add=False, reason="포트폴리오 한도 초과"),
+        )
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        log = storage.get_decision_logs(result.run_id)[0]
+        assert log["decision_outcome"] == "PORTFOLIO_REJECT"
+        assert log["rejection_stage"] == "portfolio"
+        assert log["rejection_reason"] == "포트폴리오 한도 초과"
+
+    @pytest.mark.asyncio
+    async def test_decision_log_has_required_observability_fields(self) -> None:
+        required = {
+            "chart_score",
+            "market_regime",
+            "strategy_type",
+            "candidate_action",
+            "final_action",
+            "rejection_stage",
+            "rejection_reason",
+        }
+        pipeline, storage = _pipeline_with_storage(make_deps())
+        result = await pipeline.run(make_input("BTC"))
+
+        log = storage.get_decision_logs(result.run_id)[0]
+        assert required <= set(log)
+
+    @pytest.mark.asyncio
+    async def test_market_data_failure_still_writes_decision_log(self) -> None:
+        deps = make_deps(market_data=MockMarketDataProvider(fail=True))
+        pipeline, storage = _pipeline_with_storage(deps)
+        result = await pipeline.run(make_input("BTC"))
+
+        logs = storage.get_decision_logs(result.run_id)
+        assert len(logs) == 1
+        assert logs[0]["decision_outcome"] == "HOLD"
+        assert logs[0]["rejection_stage"] == "market_data"
+        assert logs[0]["rejection_reason"] == "MarketData 수집 실패"
+
+    @pytest.mark.asyncio
+    async def test_decision_log_storage_failure_does_not_fail_pipeline(self) -> None:
+        deps = make_deps(
+            reviewer=MockReviewerProvider(result=make_review(AIReviewAction.APPROVE)),
+            risk=MockRiskProvider(result=MockValidationResult(approved=True)),
+        )
+        pipeline = OrchestratorPipeline(
+            deps,
+            runner=AgentRunner(max_retries=0),
+            orch_logger=OrchestratorLogger(FailingDecisionLogStorage()),
+        )
+        result = await pipeline.run(make_input("BTC"))
+
+        assert result.status == PipelineStatus.COMPLETED
 
 
 # ── 11. 긴급 TP/SL 실패 처리 ──────────────────────────────────────────────────

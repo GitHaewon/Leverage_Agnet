@@ -77,6 +77,10 @@ def _mock_settings(*, shadow: bool, live: bool, **extra) -> MagicMock:
     s = MagicMock()
     s.SHADOW_TRADING_ENABLED = shadow
     s.LIVE_TRADING_ENABLED = live
+    s.SHADOW_MIN_LONG_SCORE = None
+    s.SHADOW_MIN_SHORT_SCORE = None
+    s.SHADOW_MAX_RISK_SCORE = None
+    s.SHADOW_AI_REVIEW_REQUIRED = True
     s.OPENAI_API_KEY = "test-key"
     s.OPENAI_MODEL = "gpt-5"
     s.BINANCE_TESTNET = True
@@ -175,3 +179,55 @@ class TestBuildDepsExecutionMode:
 
         mock_binance_cls.assert_not_called()
         mock_shadow_cls.assert_called_once()
+
+
+class TestShadowDecisionConfig:
+    def test_shadow_mode_builds_relaxed_decision_config(self, monkeypatch):
+        monkeypatch.setattr(
+            worker_module,
+            "settings",
+            _mock_settings(
+                shadow=True,
+                live=False,
+                SHADOW_MIN_LONG_SCORE=60,
+                SHADOW_MIN_SHORT_SCORE=60,
+                SHADOW_MAX_RISK_SCORE=45,
+                SHADOW_AI_REVIEW_REQUIRED=False,
+            ),
+        )
+
+        cfg = worker_module._shadow_decision_config()
+        assert cfg == {
+            "profile": "shadow",
+            "ai_review_required": False,
+            "min_long_score": 60.0,
+            "min_short_score": 60.0,
+            "max_risk_score": 45.0,
+            "max_risk_trend": 45.0,
+            "max_risk_breakout": 45.0,
+            "max_risk_intraday": 45.0,
+            "max_risk_scalping": 45.0,
+        }
+
+    def test_live_mode_never_gets_shadow_decision_config(self, monkeypatch):
+        monkeypatch.setattr(
+            worker_module,
+            "settings",
+            _mock_settings(
+                shadow=True,
+                live=True,
+                SHADOW_MIN_LONG_SCORE=60,
+                SHADOW_MAX_RISK_SCORE=45,
+            ),
+        )
+
+        assert worker_module._shadow_decision_config() is None
+
+    def test_paper_mode_without_shadow_gets_no_shadow_decision_config(self, monkeypatch):
+        monkeypatch.setattr(
+            worker_module,
+            "settings",
+            _mock_settings(shadow=False, live=False, SHADOW_MIN_LONG_SCORE=60),
+        )
+
+        assert worker_module._shadow_decision_config() is None

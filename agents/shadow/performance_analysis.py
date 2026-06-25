@@ -1,7 +1,8 @@
 """Shadow decision-log performance analysis.
 
 Reads Step 14 decision logs from JSONL or app log lines containing
-``decision_log {json}`` and returns a JSON-serializable summary.
+``decision_log {json}``. It also accepts JSONL exported from the
+``shadow_decisions`` table and normalizes it into the decision-log shape.
 """
 from __future__ import annotations
 
@@ -52,7 +53,7 @@ def analyze_decision_logs(
     *,
     invalid_lines: int = 0,
 ) -> dict[str, Any]:
-    rows = [r for r in records if isinstance(r, dict)]
+    rows = [_normalize_record(r) for r in records if isinstance(r, dict)]
     trade_results = [_trade_result(r) for r in rows]
     closed = [t for t in trade_results if t is not None and t["closed"]]
 
@@ -66,13 +67,22 @@ def analyze_decision_logs(
     gross_values = [t["gross_pnl"] for t in closed]
     wins = [p for p in net_values if p > 0]
     losses = [p for p in net_values if p < 0]
+    total_decisions = len(rows)
+    executed_trades = sum(
+        1 for t in trade_results if t is not None and t["executed"]
+    )
+    hold_count = sum(1 for r in rows if r.get("final_action") == "HOLD")
 
     summary = {
-        "total_candidates": len(rows),
-        "executed_trades": sum(1 for t in trade_results if t is not None and t["executed"]),
+        "total_decisions": total_decisions,
+        "total_candidates": total_decisions,  # backward-compatible alias
+        "executed_trades": executed_trades,
         "closed_trades": len(closed),
-        "hold_count": sum(1 for r in rows if r.get("final_action") == "HOLD"),
+        "hold_count": hold_count,
+        "hold_rate": _ratio(hold_count, total_decisions),
         "rejection_reasons": dict(rejection_counts),
+        "rejection_reason_top10": _top_counter(rejection_counts, 10),
+        "rejection_stage_distribution": _stage_distribution(rows),
         "invalid_lines_skipped": invalid_lines,
         "win_rate": _ratio(len(wins), len(closed)),
         "net_pnl_after_fees_slippage": round(sum(net_values), 8),
@@ -97,8 +107,14 @@ def analyze_decision_logs(
         "performance_by_rr_bucket": _bucket_performance(rows, _rr_bucket),
         "performance_by_spread_bucket": _bucket_performance(rows, _spread_bucket),
         "performance_by_funding_condition": _bucket_performance(rows, _funding_bucket),
+        "market_regime_execution_rate": _execution_rate_by(rows, "market_regime"),
+        "strategy_type_execution_rate": _execution_rate_by(rows, "strategy_type"),
+        "chart_score_distribution": _chart_score_distribution(rows),
+        "ai_reject_rate": _ai_reject_rate(rows),
+        "risk_reject_code_distribution": _risk_reject_code_distribution(rows),
     }
     summary["warnings"] = _warnings(summary)
+    summary["diagnosis"] = _diagnose_zero_trades(rows, summary)
     return summary
 
 
@@ -111,20 +127,42 @@ def save_summary(summary: dict[str, Any], path: str | Path) -> None:
 
 def format_human_summary(summary: dict[str, Any]) -> str:
     warnings = summary.get("warnings") or []
+    diagnosis = summary.get("diagnosis") or {}
     lines = [
-        "Shadow Performance Summary",
-        f"Total candidates: {summary.get('total_candidates', 0)}",
-        f"Executed trades: {summary.get('executed_trades', 0)}",
-        f"HOLD count: {summary.get('hold_count', 0)}",
-        f"Win rate: {summary.get('win_rate', 0):.2%}",
-        f"Net PnL after fees/slippage: {summary.get('net_pnl_after_fees_slippage', 0):.2f}",
-        f"Gross PnL: {summary.get('gross_pnl', 0):.2f}",
-        f"Profit factor: {summary.get('profit_factor', 0):.2f}",
-        f"Max drawdown: {summary.get('max_drawdown', 0):.2f}",
-        f"Invalid lines skipped: {summary.get('invalid_lines_skipped', 0)}",
+        "Shadow Trading 의사결정 분석 요약",
+        f"- 전체 decision 수: {summary.get('total_decisions', 0)}",
+        f"- 실행된 가상 거래 수: {summary.get('executed_trades', 0)}",
+        f"- HOLD 수 / 비율: {summary.get('hold_count', 0)} / {summary.get('hold_rate', 0):.2%}",
+        f"- AI reject rate: {summary.get('ai_reject_rate', 0):.2%}",
+        f"- 승률(청산 기준): {summary.get('win_rate', 0):.2%}",
+        f"- 수수료/슬리피지 반영 순손익: {summary.get('net_pnl_after_fees_slippage', 0):.2f}",
+        f"- 총손익: {summary.get('gross_pnl', 0):.2f}",
+        f"- Profit factor: {summary.get('profit_factor', 0):.2f}",
+        f"- Max drawdown: {summary.get('max_drawdown', 0):.2f}",
+        f"- 무시한 invalid line 수: {summary.get('invalid_lines_skipped', 0)}",
     ]
+    stages = summary.get("rejection_stage_distribution") or {}
+    if stages:
+        lines.append("거절 단계별 비율:")
+        for stage, item in stages.items():
+            lines.append(
+                f"- {stage}: {item.get('count', 0)}건 ({item.get('rate', 0):.2%})"
+            )
+    reasons = summary.get("rejection_reason_top10") or []
+    if reasons:
+        lines.append("거절 사유 Top 10:")
+        for item in reasons:
+            lines.append(
+                f"- {item.get('reason')}: {item.get('count', 0)}건 "
+                f"({item.get('rate', 0):.2%})"
+            )
+    if diagnosis:
+        lines.append("자동 진단:")
+        lines.append(f"- {diagnosis.get('message', '')}")
+        for hint in diagnosis.get("hints", []) or []:
+            lines.append(f"  - {hint}")
     if warnings:
-        lines.append("Warnings:")
+        lines.append("주의:")
         lines.extend(f"- {w}" for w in warnings)
     return "\n".join(lines)
 
@@ -139,13 +177,63 @@ def _parse_line(line: str) -> dict[str, Any] | None:
         value = json.loads(text)
     except json.JSONDecodeError:
         return None
-    return value if isinstance(value, dict) else None
+    return _normalize_record(value) if isinstance(value, dict) else None
+
+
+def _normalize_record(row: dict[str, Any]) -> dict[str, Any]:
+    """Normalize decision_log rows and shadow_decisions DB export rows."""
+    normalized = dict(row)
+    if "expected_entry_price" not in normalized and "expected_entry" in normalized:
+        normalized["expected_entry_price"] = normalized.get("expected_entry")
+    if "actual_rr" not in normalized and "candidate_rr" in normalized:
+        normalized["actual_rr"] = normalized.get("candidate_rr")
+    if "leverage" not in normalized and "candidate_leverage" in normalized:
+        normalized["leverage"] = normalized.get("candidate_leverage")
+
+    if "ai_review" not in normalized and (
+        "ai_decision" in normalized
+        or "ai_confidence" in normalized
+        or "ai_critical_contradiction" in normalized
+    ):
+        normalized["ai_review"] = {
+            "review_action": normalized.get("ai_decision"),
+            "confidence": normalized.get("ai_confidence"),
+            "critical_contradiction": normalized.get("ai_critical_contradiction"),
+        }
+
+    if "risk_result" not in normalized and (
+        "risk_passed" in normalized
+        or "risk_reject_reason" in normalized
+    ):
+        normalized["risk_result"] = {
+            "approved": normalized.get("risk_passed"),
+            "rejection_reason": normalized.get("risk_reject_reason"),
+        }
+
+    if "risk_failed_checks" not in normalized:
+        code = (
+            normalized.get("risk_rejection_code")
+            or normalized.get("rejection_code")
+            or normalized.get("risk_code")
+        )
+        normalized["risk_failed_checks"] = [code] if code else []
+
+    if "actual_result" not in normalized:
+        executed = (
+            normalized.get("shadow_trade_id") is not None
+            or normalized.get("decision_outcome") == "EXECUTED"
+            or normalized.get("final_action") in {"LONG", "SHORT"}
+            and not normalized.get("rejection_reason")
+        )
+        normalized["actual_result"] = {"executed": bool(executed)}
+
+    return normalized
 
 
 def _trade_result(row: dict[str, Any]) -> dict[str, Any] | None:
     action = row.get("final_action") or row.get("candidate_action")
     actual = row.get("actual_result") or {}
-    executed = bool(actual.get("executed"))
+    executed = bool(actual.get("executed")) or row.get("decision_outcome") == "EXECUTED"
     if action not in {"LONG", "SHORT"} and not executed:
         return None
 
@@ -214,9 +302,13 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
     net = [r["net_pnl"] for r in closed]
     wins = [p for p in net if p > 0]
     losses = [p for p in net if p < 0]
+    executed = sum(1 for r in results if r is not None and r["executed"])
     return {
         "total_candidates": len(rows),
-        "executed_trades": sum(1 for r in results if r is not None and r["executed"]),
+        "total_decisions": len(rows),
+        "executed_trades": executed,
+        "execution_rate": _ratio(executed, len(rows)),
+        "hold_rate": _ratio(sum(1 for r in rows if r.get("final_action") == "HOLD"), len(rows)),
         "closed_trades": len(closed),
         "win_rate": _ratio(len(wins), len(closed)),
         "net_pnl_after_fees_slippage": round(sum(net), 8),
@@ -224,6 +316,173 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "profit_factor": _profit_factor(net),
         "average_win": _average(wins),
         "average_loss": _average(losses),
+    }
+
+
+def _execution_rate_by(rows: list[dict[str, Any]], field: str) -> dict[str, dict[str, Any]]:
+    grouped = _group_performance(rows, field)
+    return {
+        key: {
+            "total_decisions": value.get("total_decisions", value.get("total_candidates", 0)),
+            "executed_trades": value.get("executed_trades", 0),
+            "execution_rate": value.get("execution_rate", 0.0),
+            "hold_rate": value.get("hold_rate", 0.0),
+        }
+        for key, value in grouped.items()
+    }
+
+
+def _stage_distribution(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    counter = Counter(str(r.get("rejection_stage") or "NONE") for r in rows)
+    total = len(rows)
+    return {
+        stage: {"count": count, "rate": _ratio(count, total)}
+        for stage, count in sorted(counter.items())
+    }
+
+
+def _top_counter(counter: Counter, limit: int) -> list[dict[str, Any]]:
+    total = sum(counter.values())
+    return [
+        {"reason": reason, "count": count, "rate": _ratio(count, total)}
+        for reason, count in counter.most_common(limit)
+    ]
+
+
+def _chart_score_distribution(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    buckets: Counter = Counter()
+    for row in rows:
+        score = _chart_score_value(row.get("chart_score"))
+        if score is None:
+            buckets["UNKNOWN"] += 1
+        elif score < 50:
+            buckets["<50"] += 1
+        elif score < 60:
+            buckets["50-60"] += 1
+        elif score < 70:
+            buckets["60-70"] += 1
+        elif score < 80:
+            buckets["70-80"] += 1
+        else:
+            buckets[">=80"] += 1
+    total = len(rows)
+    order = ("<50", "50-60", "60-70", "70-80", ">=80", "UNKNOWN")
+    return {
+        bucket: {"count": buckets.get(bucket, 0), "rate": _ratio(buckets.get(bucket, 0), total)}
+        for bucket in order
+        if buckets.get(bucket, 0) or bucket == "UNKNOWN"
+    }
+
+
+def _chart_score_value(value: Any) -> float | None:
+    if isinstance(value, dict):
+        long_score = value.get("long_score")
+        short_score = value.get("short_score")
+        if long_score is not None or short_score is not None:
+            return max(_num(long_score), _num(short_score))
+        for key in ("score", "value", "technical_score"):
+            if value.get(key) is not None:
+                return _num(value.get(key))
+        return None
+    if value is None:
+        return None
+    return _num(value)
+
+
+def _ai_reject_rate(rows: list[dict[str, Any]]) -> float:
+    reviewed = []
+    for row in rows:
+        review = row.get("ai_review") or {}
+        action = review.get("review_action") or row.get("ai_decision")
+        if action:
+            reviewed.append(str(action).upper())
+    return _ratio(sum(1 for action in reviewed if action == "REJECT"), len(reviewed))
+
+
+def _risk_reject_code_distribution(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counter: Counter = Counter()
+    for row in rows:
+        checks = row.get("risk_failed_checks") or []
+        if isinstance(checks, str):
+            checks = [checks]
+        for check in checks:
+            if check:
+                counter[str(check)] += 1
+        risk = row.get("risk_result") or {}
+        code = risk.get("rejection_code") or row.get("risk_rejection_code")
+        if code:
+            counter[str(code)] += 1
+        reason = row.get("risk_reject_reason")
+        if reason and not checks and not code:
+            counter[str(reason)] += 1
+    return dict(counter.most_common())
+
+
+def _diagnose_zero_trades(
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    executed = int(summary.get("executed_trades", 0) or 0)
+    if executed > 0:
+        return {
+            "severity": "info",
+            "message": "가상 거래가 발생했습니다. 거래 0건 진단은 필요하지 않습니다.",
+            "hints": [],
+        }
+    total = len(rows)
+    if total == 0:
+        return {
+            "severity": "warning",
+            "message": "decision_log가 없습니다. 파이프라인 실행 또는 로그 수집이 먼저 의심됩니다.",
+            "hints": [
+                "SHADOW_TRADING_ENABLED=true 상태로 analysis worker가 돌았는지 확인하세요.",
+                "로그 파일에 'decision_log {json}' 라인이 있는지 확인하세요.",
+            ],
+        }
+
+    stage_counts = Counter(str(r.get("rejection_stage") or "NONE") for r in rows)
+    top_stage, top_stage_count = stage_counts.most_common(1)[0]
+    reason_counts = Counter(
+        str(r.get("rejection_reason") or "UNKNOWN")
+        for r in rows
+        if r.get("rejection_reason") or r.get("final_action") == "HOLD"
+    )
+    top_reason = reason_counts.most_common(1)[0][0] if reason_counts else "UNKNOWN"
+    risk_codes = summary.get("risk_reject_code_distribution") or {}
+    ai_reject_rate = float(summary.get("ai_reject_rate") or 0.0)
+
+    hints: list[str] = []
+    if top_stage in {"decision", "final_decision", "NONE"}:
+        message = "거래 0건의 가장 의심되는 원인은 Decision/FinalDecision 단계의 HOLD 조건입니다."
+        hints.extend([
+            "chart_score 분포와 min_long/min_short threshold를 비교하세요.",
+            "shadow 전용 SHADOW_MIN_LONG_SCORE/SHADOW_MIN_SHORT_SCORE 완화가 적용됐는지 확인하세요.",
+        ])
+    elif top_stage == "ai_review" or ai_reject_rate >= 0.5:
+        message = "거래 0건의 가장 의심되는 원인은 AI Reviewer 거절입니다."
+        hints.extend([
+            "시장 국면별 전략 플레이북에서 candidate.strategy_type이 허용되는지 확인하세요.",
+            "shadow에서 샘플 수집 목적이면 SHADOW_AI_REVIEW_REQUIRED=false를 검토하세요.",
+        ])
+    elif top_stage == "risk" or risk_codes:
+        message = "거래 0건의 가장 의심되는 원인은 RiskEngine 거절입니다."
+        hints.extend([
+            "risk_failed_checks 또는 risk_reject_code 분포를 먼저 보세요.",
+            "R:R, 일일 손실 한도, 포지션 수 제한, 잔고 조건을 확인하세요.",
+        ])
+    elif top_stage == "portfolio":
+        message = "거래 0건의 가장 의심되는 원인은 Portfolio 제한입니다."
+        hints.append("max concurrent positions 또는 portfolio risk budget을 확인하세요.")
+    else:
+        message = f"거래 0건의 가장 의심되는 원인은 {top_stage} 단계의 거절입니다."
+
+    return {
+        "severity": "warning",
+        "message": message,
+        "top_rejection_stage": top_stage,
+        "top_rejection_stage_rate": _ratio(top_stage_count, total),
+        "top_rejection_reason": top_reason,
+        "hints": hints,
     }
 
 

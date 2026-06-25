@@ -48,6 +48,31 @@ class StrategySignal:
 
 
 @dataclass
+class StrategyCandidate:
+    """시장 국면별로 필터링 가능한 전략 후보.
+
+    기존 StrategySignal을 감싸는 adapter 모델이다. 아직 Decision layer의
+    TradeCandidate가 아니며, 주문/리스크 실행 권한도 없다.
+    """
+
+    strategy_name: str
+    source_strategy: str
+    direction: Direction
+    confidence: float
+    entry: Decimal
+    take_profit: Decimal
+    stop_loss: Decimal
+    leverage: int
+    rr_ratio: float
+    reason: str
+    signals_fired: list[str] = field(default_factory=list)
+
+    @property
+    def entry_price(self) -> Decimal:
+        return self.entry
+
+
+@dataclass
 class StrategyInput:
     """Strategy Engine 입력 데이터."""
 
@@ -72,3 +97,4 @@ class AggregatedSignal:
     reasons: list[str]
     contributing_strategies: list[str]
     all_signals: list[StrategySignal] = field(default_factory=list)
+    candidates: list[StrategyCandidate] = field(default_factory=list)

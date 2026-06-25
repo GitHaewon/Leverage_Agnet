@@ -122,6 +122,51 @@ async def test_save_allows_null_diagnostic_fields():
     assert added_orm.risk_passed is None
 
 
+@pytest.mark.asyncio
+async def test_save_decision_log_maps_payload_to_shadow_decision():
+    repo, session = _make_repo()
+    trade_id = uuid.uuid4()
+    await repo.save_decision_log(
+        "run-001",
+        {
+            "run_id": "run-001",
+            "user_id": "user-001",
+            "coin": "BTC",
+            "timestamp": "2026-06-25T12:00:00+00:00",
+            "market_regime": "TREND_UP",
+            "chart_score": {"long_score": 80.0, "short_score": 10.0},
+            "strategy_type": "PULLBACK",
+            "candidate_action": "LONG",
+            "final_action": "LONG",
+            "expected_entry_price": 67000.0,
+            "stop_loss": 66000.0,
+            "take_profit": 69200.0,
+            "actual_rr": 2.2,
+            "leverage": 5,
+            "ai_review": {
+                "review_action": "APPROVE",
+                "confidence": 0.85,
+                "critical_contradiction": False,
+            },
+            "risk_result": {"approved": True},
+            "rejection_stage": None,
+            "rejection_reason": None,
+            "actual_result": {
+                "entry_exchange_order_id": f"shadow-entry-{trade_id}",
+            },
+        },
+    )
+
+    added_orm = session.add.call_args[0][0]
+    assert added_orm.run_id == "run-001"
+    assert added_orm.user_id == "user-001"
+    assert added_orm.final_action == "LONG"
+    assert added_orm.chart_score == Decimal("0.7")
+    assert added_orm.ai_decision == "APPROVE"
+    assert added_orm.risk_passed is True
+    assert added_orm.shadow_trade_id == trade_id
+
+
 # ── Group 2: list_decisions() ────────────────────────────────────────────────
 
 @pytest.mark.asyncio

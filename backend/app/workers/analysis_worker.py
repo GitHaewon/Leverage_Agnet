@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -19,12 +18,35 @@ from celery import Task
 
 from app.workers.celery_app import celery_app
 from app.core.config import settings
-from app.schemas.shadow_decisions import (
-    pipeline_status_to_action as _pipeline_status_to_action,
-    infer_rejection_stage as _infer_rejection_stage,
-)
 
 logger = logging.getLogger(__name__)
+
+
+def _shadow_decision_config() -> dict[str, Any] | None:
+    """Shadow mode 전용 DecisionEngine 완화 프로파일.
+
+    LIVE_TRADING_ENABLED=true일 때는 절대 적용하지 않는다.
+    값이 설정되지 않은 threshold는 기존 live 기본 상수를 그대로 사용한다.
+    """
+    if settings.LIVE_TRADING_ENABLED or not settings.SHADOW_TRADING_ENABLED:
+        return None
+
+    cfg: dict[str, Any] = {
+        "ai_review_required": bool(settings.SHADOW_AI_REVIEW_REQUIRED),
+        "profile": "shadow",
+    }
+    if settings.SHADOW_MIN_LONG_SCORE is not None:
+        cfg["min_long_score"] = float(settings.SHADOW_MIN_LONG_SCORE)
+    if settings.SHADOW_MIN_SHORT_SCORE is not None:
+        cfg["min_short_score"] = float(settings.SHADOW_MIN_SHORT_SCORE)
+    if settings.SHADOW_MAX_RISK_SCORE is not None:
+        shadow_risk = float(settings.SHADOW_MAX_RISK_SCORE)
+        cfg["max_risk_score"] = shadow_risk        # candidate_generator gate
+        cfg["max_risk_trend"] = shadow_risk        # strategy_selector TREND
+        cfg["max_risk_breakout"] = shadow_risk     # strategy_selector BREAKOUT
+        cfg["max_risk_intraday"] = shadow_risk     # strategy_selector INTRADAY
+        cfg["max_risk_scalping"] = shadow_risk     # strategy_selector SCALPING
+    return cfg
 
 
 # ── 의존성 조립 ──────────────────────────────────────────────────────────────
@@ -186,6 +208,7 @@ async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
                     consecutive_losses=user.consecutive_losses,
                     open_positions=user.open_positions or [],
                     portfolio_account=user.portfolio_account,
+                    decision_config=_shadow_decision_config(),
                 )
                 try:
                     if settings.LIVE_TRADING_ENABLED:
@@ -194,33 +217,34 @@ async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
                         # NullPool 엔진으로 새 세션 생성 — asyncio.run() event loop 경계 문제 방지
                         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
                         from sqlalchemy.pool import NullPool
+                        from agents.orchestrator.logger import OrchestratorLogger
                         from app.repositories.shadow_decision_repository import ShadowDecisionRepository
-                        from app.schemas.shadow_decisions import ShadowDecisionRecord
                         _engine = create_async_engine(settings.async_database_url, poolclass=NullPool)
                         try:
                             _sf = async_sessionmaker(
                                 _engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
                             )
-                            async with _sf() as session:
-                                shadow_deps = await _build_deps(redis_client, session=session)
-                                result = await OrchestratorPipeline(shadow_deps).run(inp)
-                                _final_action = _pipeline_status_to_action(
-                                    result.status, result.execution_result
+                            async with _sf() as trade_session, _sf() as decision_session:
+                                shadow_deps = await _build_deps(
+                                    redis_client,
+                                    session=trade_session,
                                 )
-                                await ShadowDecisionRepository(session).save(
-                                    ShadowDecisionRecord(
-                                        run_id=str(result.run_id),
-                                        user_id=str(user.id),
-                                        coin=coin,
-                                        final_action=_final_action,  # type: ignore[arg-type]
-                                        decided_at=datetime.now(timezone.utc),
-                                        rejection_reason=result.rejection_reason,
-                                        rejection_stage=_infer_rejection_stage(
-                                            result.status, result.rejection_reason
-                                        ),
+                                result = await OrchestratorPipeline(
+                                    shadow_deps,
+                                    orch_logger=OrchestratorLogger(
+                                        ShadowDecisionRepository(decision_session)
+                                    ),
+                                ).run(inp)
+                                await trade_session.commit()
+                                try:
+                                    await decision_session.commit()
+                                except Exception:
+                                    await decision_session.rollback()
+                                    logger.exception(
+                                        "shadow_decision commit failed user=%s coin=%s",
+                                        user.id,
+                                        coin,
                                     )
-                                )
-                                await session.commit()
                         finally:
                             await _engine.dispose()
                     else:
@@ -291,30 +315,31 @@ async def _run_single_async(
             consecutive_losses=user.consecutive_losses,
             open_positions=user.open_positions or [],
             portfolio_account=user.portfolio_account,
+            decision_config=_shadow_decision_config(),
         )
 
         if settings.SHADOW_TRADING_ENABLED and not settings.LIVE_TRADING_ENABLED:
+            from agents.orchestrator.logger import OrchestratorLogger
             from app.core.database import AsyncSessionLocal
             from app.repositories.shadow_decision_repository import ShadowDecisionRepository
-            from app.schemas.shadow_decisions import ShadowDecisionRecord
-            async with AsyncSessionLocal() as session:
-                deps = await _build_deps(redis_client, session=session)
-                result = await OrchestratorPipeline(deps).run(inp)
-                _final_action = _pipeline_status_to_action(result.status, result.execution_result)
-                await ShadowDecisionRepository(session).save(
-                    ShadowDecisionRecord(
-                        run_id=str(result.run_id),
-                        user_id=user_id,
-                        coin=coin,
-                        final_action=_final_action,  # type: ignore[arg-type]
-                        decided_at=datetime.now(timezone.utc),
-                        rejection_reason=result.rejection_reason,
-                        rejection_stage=_infer_rejection_stage(
-                            result.status, result.rejection_reason
-                        ),
+            async with AsyncSessionLocal() as trade_session, AsyncSessionLocal() as decision_session:
+                deps = await _build_deps(redis_client, session=trade_session)
+                result = await OrchestratorPipeline(
+                    deps,
+                    orch_logger=OrchestratorLogger(
+                        ShadowDecisionRepository(decision_session)
+                    ),
+                ).run(inp)
+                await trade_session.commit()
+                try:
+                    await decision_session.commit()
+                except Exception:
+                    await decision_session.rollback()
+                    logger.exception(
+                        "shadow_decision commit failed user=%s coin=%s",
+                        user_id,
+                        coin,
                     )
-                )
-                await session.commit()
         else:
             deps = await _build_deps(redis_client, user_id=uid)
             result = await OrchestratorPipeline(deps).run(inp)

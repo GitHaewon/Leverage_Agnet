@@ -321,6 +321,7 @@ def generate_trade_candidate(
     news_score 는 no_trade_flag 와 리스크에만 반영한다.
     """
     strategy_type = _as_strategy_type(_read(strategy_selection, "strategy_type"))
+    strategy_name = _read(strategy_signal, "strategy_name") or strategy_type.value
     expected_minutes = int(_read(strategy_selection, "expected_holding_minutes", 0) or 0)
     min_required_rr = float(_read(strategy_selection, "min_required_rr", 0.0) or 0.0)
     if min_required_rr <= 0 and strategy_type != StrategyType.UNKNOWN:
@@ -488,4 +489,5 @@ def generate_trade_candidate(
         spread_bps=spread_bps,
         slippage_bps=slippage_bps,
         reasons=reasons,
+        strategy_name=str(strategy_name),
     )

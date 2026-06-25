@@ -17,8 +17,9 @@ from unittest.mock import patch
 
 import pytest
 
-from agents.strategy.engine import StrategyEngine, _aggregate
-from agents.strategy.models import AggregatedSignal, StrategyInput, StrategySignal
+from agents.decision.models import MarketRegime
+from agents.strategy.engine import StrategyEngine, _aggregate, build_strategy_candidates
+from agents.strategy.models import AggregatedSignal, StrategyInput, StrategyCandidate, StrategySignal
 from agents.strategy.risk_bridge import aggregated_signal_to_raw, strategy_signal_to_raw
 
 from tests.unit.agents._strategy_fixtures import (
@@ -116,6 +117,46 @@ def test_aggregate_confidence_average():
     inp = _make_inp()
     result = _aggregate(signals, inp)
     assert result.confidence == pytest.approx(0.75, abs=1e-3)
+
+
+# ── StrategyCandidate adapter ────────────────────────────────────────────────
+
+def test_build_strategy_candidates_splits_strategy_names():
+    signals = [
+        _make_sig("LONG", "ema_trend", confidence=0.80),
+        _make_sig("LONG", "breakout", confidence=0.75),
+        _make_sig("LONG", "rsi_reversal", confidence=0.70),
+    ]
+    candidates = build_strategy_candidates(signals, MarketRegime.TREND_UP)
+    names = {c.strategy_name for c in candidates}
+    assert "TREND_PULLBACK" in names
+    assert "BREAKOUT_RETEST" in names
+    assert "RANGE_MEAN_REVERSION" not in names
+
+
+def test_build_strategy_candidates_range_blocks_trend_pullback_and_breakout_retest():
+    signals = [
+        _make_sig("LONG", "ema_trend", confidence=0.80),
+        _make_sig("LONG", "breakout", confidence=0.75),
+        _make_sig("LONG", "rsi_reversal", confidence=0.70),
+    ]
+    candidates = build_strategy_candidates(signals, MarketRegime.RANGE)
+    assert [c.strategy_name for c in candidates] == ["RANGE_MEAN_REVERSION"]
+
+
+def test_build_strategy_candidates_high_volatility_returns_empty():
+    signals = [_make_sig("LONG", "ema_trend", confidence=0.80)]
+    assert build_strategy_candidates(signals, MarketRegime.HIGH_VOLATILITY) == []
+
+
+def test_aggregated_signal_keeps_candidates_for_adapter_compatibility():
+    signals = [_make_sig("LONG", "ema_trend", confidence=0.80)]
+    inp = _make_inp()
+    with patch("agents.strategy.engine._build_strategies", return_value=[]):
+        pass
+    agg = _aggregate(signals, inp)
+    agg.candidates = build_strategy_candidates(signals, MarketRegime.TREND_UP)
+    assert isinstance(agg.candidates[0], StrategyCandidate)
 
 
 # ── StrategyEngine 최소 신뢰도 필터 ──────────────────────────────────────────
