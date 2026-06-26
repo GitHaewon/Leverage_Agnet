@@ -19,6 +19,7 @@ async def connect_redis() -> None:
         encoding="utf-8",
         decode_responses=True,
         max_connections=settings.REDIS_MAX_CONNECTIONS,
+        protocol=2,
     )
     await _redis.ping()
     logger.info("Redis connected: %s", _safe_url(str(settings.REDIS_URL)))
