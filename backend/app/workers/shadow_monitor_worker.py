@@ -40,11 +40,24 @@ async def check_and_close_shadow_trades(
 
     repo = ShadowTradeRepository(session)
     open_trades: Sequence[ShadowTrade] = await repo.get_open_trades()
+    logger.info(
+        "shadow_monitor_check open_trades=%d price_symbols=%s",
+        len(open_trades),
+        sorted(current_prices.keys()),
+    )
     closed = 0
+    missing_prices = 0
 
     for trade in open_trades:
         current_price = current_prices.get(trade.symbol)
         if current_price is None:
+            missing_prices += 1
+            logger.warning(
+                "shadow_monitor_missing_price trade_id=%s symbol=%s direction=%s",
+                trade.id,
+                trade.symbol,
+                trade.direction,
+            )
             continue
 
         exit_price: Decimal | None = None
@@ -82,10 +95,19 @@ async def check_and_close_shadow_trades(
         )
         closed += 1
         logger.info(
-            "shadow_trade_closed id=%s status=%s pnl=%.4f duration=%.1fs",
-            trade.id, status, pnl, duration,
+            "shadow_trade_closed id=%s symbol=%s direction=%s status=%s "
+            "entry=%s exit=%s tp=%s sl=%s qty=%s pnl=%.4f duration=%.1fs",
+            trade.id, trade.symbol, trade.direction, status,
+            trade.entry_price, exit_price, trade.tp_price, trade.sl_price,
+            trade.quantity, pnl, duration,
         )
 
+    logger.info(
+        "shadow_monitor_result checked=%d closed=%d missing_prices=%d",
+        len(open_trades),
+        closed,
+        missing_prices,
+    )
     return closed
 
 

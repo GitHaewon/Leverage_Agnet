@@ -105,6 +105,20 @@ def _cfg(config: object | None, key: str, default: object) -> object:
     return getattr(config, key, default)
 
 
+def _candidate_to_raw_signal(candidate: TradeCandidate) -> RawSignal:
+    action = getattr(candidate.action, "value", candidate.action)
+    return RawSignal(
+        direction=str(action),  # type: ignore[arg-type]
+        coin=candidate.coin,
+        symbol=candidate.symbol,
+        confidence=float(getattr(candidate, "confidence", 1.0) or 1.0),
+        entry_price=candidate.entry_price,
+        take_profit=candidate.take_profit,
+        stop_loss=candidate.stop_loss,
+        leverage=candidate.leverage,
+    )
+
+
 def _as_regime(value: object | None) -> MarketRegime:
     if isinstance(value, MarketRegimeResult):
         return value.regime
@@ -526,6 +540,19 @@ class RiskEngine:
                 return _reject_candidate("ORDER_002", reason, failed, warnings, candidate, ctx)
 
             if same_coin_position is not None:
+                can_proceed, coin_reason, _pre_action = check_same_coin_position(
+                    _candidate_to_raw_signal(candidate),
+                    same_coin_position,
+                )
+                if not can_proceed:
+                    return _reject_candidate(
+                        "POSITION_CONFLICT",
+                        coin_reason,
+                        failed,
+                        warnings,
+                        candidate,
+                        ctx,
+                    )
                 return _reject_candidate(
                     "POSITION_CONFLICT",
                     f"{candidate.coin} 기존 포지션이 있어 신규 후보를 거부합니다",

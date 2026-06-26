@@ -10,6 +10,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.shadow.models import ShadowTradeRecord
+from agents.risk.models import OpenPosition
 from app.models.shadow_trade import ShadowTrade
 from app.schemas.shadow_trades import ShadowTradeStats
 
@@ -44,6 +45,41 @@ class ShadowTradeRepository:
             stmt = stmt.where(ShadowTrade.user_id == user_id)
         result = await self._session.execute(stmt)
         return result.scalars().all()
+
+    async def get_open_positions_for_risk(self, user_id: str) -> list[OpenPosition]:
+        """Aggregate OPEN shadow fills into position-shaped risk inputs."""
+        trades = await self.get_open_trades(user_id)
+        grouped: dict[tuple[str, str], list[ShadowTrade]] = {}
+        for trade in trades:
+            grouped.setdefault((trade.coin, trade.direction), []).append(trade)
+
+        positions: list[OpenPosition] = []
+        for legs in grouped.values():
+            total_qty = sum((leg.quantity for leg in legs), Decimal("0"))
+            if total_qty <= 0:
+                continue
+            entry = sum((leg.entry_price * leg.quantity for leg in legs), Decimal("0")) / total_qty
+            stop_loss = sum((leg.sl_price * leg.quantity for leg in legs), Decimal("0")) / total_qty
+            leverage = round(
+                sum((Decimal(leg.leverage) * leg.quantity for leg in legs), Decimal("0")) / total_qty
+            )
+            original = min(legs, key=lambda leg: leg.opened_at)
+            original_risk = abs(original.entry_price - original.sl_price) * original.quantity
+            positions.append(
+                OpenPosition(
+                    id=original.id,
+                    coin=original.coin,
+                    symbol=original.symbol,
+                    direction=original.direction,
+                    entry_price=entry,
+                    quantity=total_qty,
+                    stop_loss=stop_loss,
+                    leverage=int(leverage),
+                    dca_count=max(0, len(legs) - 1),
+                    original_risk_usdt=original_risk,
+                )
+            )
+        return positions
 
     async def list_trades(
         self,

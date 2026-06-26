@@ -48,6 +48,17 @@ class ShadowDecisionRepository:
             market_regime=record.market_regime,
             chart_score=Decimal(str(record.chart_score)) if record.chart_score is not None else None,
             strategy_type=record.strategy_type,
+            long_score=_decimal_from_float(record.long_score),
+            short_score=_decimal_from_float(record.short_score),
+            risk_score=_decimal_from_float(record.risk_score),
+            min_long_score=_decimal_from_float(record.min_long_score),
+            min_short_score=_decimal_from_float(record.min_short_score),
+            max_risk_score=_decimal_from_float(record.max_risk_score),
+            decision_score_summary=(
+                (record.decision_score_summary or "")[:500]
+                if record.decision_score_summary
+                else None
+            ),
             candidate_action=record.candidate_action,
             expected_entry=record.expected_entry,
             stop_loss=record.stop_loss,
@@ -95,6 +106,13 @@ class ShadowDecisionRepository:
             market_regime=_str_or_none(payload.get("market_regime")),
             chart_score=_chart_score_value(payload.get("chart_score")),
             strategy_type=_str_or_none(payload.get("strategy_type")),
+            long_score=_float_or_none(payload.get("long_score")),
+            short_score=_float_or_none(payload.get("short_score")),
+            risk_score=_float_or_none(payload.get("risk_score")),
+            min_long_score=_float_or_none(payload.get("min_long_score")),
+            min_short_score=_float_or_none(payload.get("min_short_score")),
+            max_risk_score=_float_or_none(payload.get("max_risk_score")),
+            decision_score_summary=_str_or_none(payload.get("decision_score_summary")),
             candidate_action=_str_or_none(payload.get("candidate_action")),
             expected_entry=_decimal_or_none(payload.get("expected_entry_price")),
             stop_loss=_decimal_or_none(payload.get("stop_loss")),
@@ -219,6 +237,10 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _decimal_from_float(value: float | None) -> Decimal | None:
+    return Decimal(str(value)) if value is not None else None
 
 
 def _int_or_none(value: Any) -> int | None:

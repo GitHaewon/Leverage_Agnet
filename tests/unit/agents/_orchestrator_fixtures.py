@@ -339,6 +339,19 @@ class MockExecutionProvider:
         return self._result
 
 
+class MockAlertDispatcher:
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def dispatch(self, event: Any) -> Any:
+        self.events.append(event)
+        return type(
+            "AlertResult",
+            (),
+            {"success": True, "event_type": getattr(event, "event_type", ""), "error": None},
+        )()
+
+
 class MockShadowExecutionProvider:
     """Shadow 모드: 가상 체결만 기록하고 실제 주문은 절대 넣지 않는다."""
     def __init__(self) -> None:
@@ -370,6 +383,7 @@ def make_deps(
     portfolio: Any = None,
     position_manager: Any = None,
     execution: Any = None,
+    alert_dispatcher: Any = None,
 ) -> "OrchestratorDeps":
     from agents.orchestrator.pipeline import OrchestratorDeps
     return OrchestratorDeps(
@@ -382,6 +396,7 @@ def make_deps(
         portfolio=portfolio or MockPortfolioProvider(),
         position_manager=position_manager or MockPositionManagerProvider(),
         execution=execution or MockExecutionProvider(),
+        alert_dispatcher=alert_dispatcher,
     )
 
 

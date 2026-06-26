@@ -219,29 +219,41 @@ async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
                         from sqlalchemy.pool import NullPool
                         from agents.orchestrator.logger import OrchestratorLogger
                         from app.repositories.shadow_decision_repository import ShadowDecisionRepository
+                        from app.repositories.shadow_trade_repository import ShadowTradeRepository
                         _engine = create_async_engine(settings.async_database_url, poolclass=NullPool)
                         try:
                             _sf = async_sessionmaker(
                                 _engine, class_=AsyncSession, expire_on_commit=False, autoflush=False, autocommit=False
                             )
-                            async with _sf() as trade_session, _sf() as decision_session:
+                            async with _sf() as shadow_session:
+                                shadow_repo = ShadowTradeRepository(shadow_session)
+                                shadow_positions = await shadow_repo.get_open_positions_for_risk(str(user.id))
+                                inp.open_positions = list(shadow_positions)
+                                if inp.account_state is not None:
+                                    inp.account_state.open_positions_count = len(shadow_positions)
+                                    inp.account_state.open_positions_risk_usdt = sum(
+                                        (
+                                            getattr(pos, "original_risk_usdt", Decimal("0"))
+                                            for pos in shadow_positions
+                                        ),
+                                        Decimal("0"),
+                                    )
                                 shadow_deps = await _build_deps(
                                     redis_client,
-                                    session=trade_session,
+                                    session=shadow_session,
                                 )
                                 result = await OrchestratorPipeline(
                                     shadow_deps,
                                     orch_logger=OrchestratorLogger(
-                                        ShadowDecisionRepository(decision_session)
+                                        ShadowDecisionRepository(shadow_session)
                                     ),
                                 ).run(inp)
-                                await trade_session.commit()
                                 try:
-                                    await decision_session.commit()
+                                    await shadow_session.commit()
                                 except Exception:
-                                    await decision_session.rollback()
+                                    await shadow_session.rollback()
                                     logger.exception(
-                                        "shadow_decision commit failed user=%s coin=%s",
+                                        "shadow commit failed user=%s coin=%s",
                                         user.id,
                                         coin,
                                     )

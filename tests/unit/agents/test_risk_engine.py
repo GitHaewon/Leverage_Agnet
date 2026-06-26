@@ -392,6 +392,36 @@ class TestSameCoinPosition:
         # DCA 경로 → 승인되어야 함 (포지션 한도가 1이어도 same coin이라면)
         assert result.pre_action == "dca"
 
+    async def test_same_direction_rejects_when_dca_limit_reached(
+        self, engine: RiskEngine
+    ) -> None:
+        existing = OpenPosition(
+            id=uuid.uuid4(),
+            coin="BTC",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=Decimal("65000"),
+            quantity=Decimal("0.01"),
+            stop_loss=Decimal("64000"),
+            leverage=5,
+            dca_count=2,
+        )
+        result = await engine.validate(
+            signal=_make_signal(direction="LONG"),
+            ctx=_make_ctx(plan="pro"),
+            account=_make_account(),
+            daily_loss_usdt=Decimal("0"),
+            weekly_loss_usdt=Decimal("0"),
+            weekly_limit_usdt=Decimal("1000"),
+            consecutive_losses=0,
+            open_positions_count=1,
+            same_coin_position=existing,
+        )
+        assert result.approved is False
+        assert result.rejection_code == "POSITION_CONFLICT"
+        assert result.rejection_reason is not None
+        assert "DCA_LIMIT" in result.rejection_reason
+
     async def test_opposite_direction_triggers_close_existing(
         self, engine: RiskEngine
     ) -> None:

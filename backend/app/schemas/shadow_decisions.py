@@ -76,6 +76,13 @@ class ShadowDecisionRecord:
     market_regime:  str | None = None
     chart_score:    float | None = None
     strategy_type:  str | None = None
+    long_score:     float | None = None
+    short_score:    float | None = None
+    risk_score:     float | None = None
+    min_long_score: float | None = None
+    min_short_score: float | None = None
+    max_risk_score: float | None = None
+    decision_score_summary: str | None = None
 
     # TradeCandidate
     candidate_action:   str | None = None
@@ -113,6 +120,13 @@ class ShadowDecisionOut(BaseModel):
     market_regime:  str | None
     chart_score:    float | None
     strategy_type:  str | None
+    long_score:     float | None
+    short_score:    float | None
+    risk_score:     float | None
+    min_long_score: float | None
+    min_short_score: float | None
+    max_risk_score: float | None
+    decision_score_summary: str | None
 
     candidate_action:   str | None
     expected_entry:     Decimal | None

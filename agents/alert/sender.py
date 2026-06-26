@@ -24,7 +24,7 @@ class TelegramSender:
 
     _API_BASE = "https://api.telegram.org"
 
-    def __init__(self, bot_token: str, timeout: float = 10.0) -> None:
+    def __init__(self, bot_token: str, timeout: float = 30.0) -> None:
         if not bot_token:
             raise ValueError("bot_token은 비어 있을 수 없습니다.")
         self._token = bot_token

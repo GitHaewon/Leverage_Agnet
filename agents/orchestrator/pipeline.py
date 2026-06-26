@@ -33,6 +33,11 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Awaitable, Callable, Optional, Protocol, runtime_checkable
 
+from agents.decision.candidate_generator import (
+    _adjusted_scores as _candidate_adjusted_scores,
+    _combined_risk as _candidate_combined_risk,
+)
+from agents.decision.constants import MAX_RISK_SCORE, MIN_LONG_SCORE, MIN_SHORT_SCORE
 from agents.orchestrator.logger import OrchestratorLogger
 from agents.orchestrator.models import (
     AgentResult,
@@ -293,6 +298,7 @@ class OrchestratorPipeline:
                 rejection_reason=rejection_reason,
                 execution_result=execution_result,
                 rejection_stage=rejection_stage,
+                decision_config=getattr(inp, "decision_config", None),
             )
             await self._logger.log_decision(ctx.run_id, payload)
 
@@ -301,6 +307,7 @@ class OrchestratorPipeline:
             "market_data",
             lambda: self._deps.market_data.get_snapshot(inp.coin),
         )
+
         if r1.failed:
             ctx.errors.append({"agent": "market_data", "error": r1.error})
             await _log_decision("MarketData 수집 실패", rejection_stage="market_data")
@@ -431,7 +438,11 @@ class OrchestratorPipeline:
         ctx.raw_signal = raw_signal
 
         # ── Step 6: Risk Engine (최종 안전 게이트) ────────────────────────────
-        same_coin = _find_same_coin_position(inp.open_positions, inp.coin)
+        same_coin = _find_same_coin_position(
+            inp.open_positions,
+            inp.coin,
+            getattr(raw_signal, "direction", None),
+        )
         regime_result = getattr(ctx.decision_result, "regime", None)
         r6 = await _run_step(
             "risk",
@@ -632,6 +643,13 @@ class OrchestratorPipeline:
                 execution_result=er,
             )
 
+        if (
+            er is not None
+            and getattr(er, "executed", False)
+            and self._deps.alert_dispatcher is not None
+        ):
+            await _fire_order_filled_alert(self._deps.alert_dispatcher, inp, ctx)
+
         await _log_decision(None, er)
         return _finish(PipelineStatus.COMPLETED, execution_result=er)
 
@@ -813,12 +831,20 @@ def _neutral_strategy_signal() -> Any:
     )
 
 
-def _find_same_coin_position(positions: list[Any], coin: str) -> Any | None:
+def _find_same_coin_position(
+    positions: list[Any],
+    coin: str,
+    direction: str | None = None,
+) -> Any | None:
     """오픈 포지션 중 같은 코인 포지션 반환."""
+    fallback = None
     for p in positions:
         if getattr(p, "coin", None) == coin or getattr(p, "symbol", "").startswith(coin):
-            return p
-    return None
+            if direction is not None and getattr(p, "direction", None) == direction:
+                return p
+            if fallback is None:
+                fallback = p
+    return fallback
 
 
 def _build_decision_log_payload(
@@ -828,6 +854,7 @@ def _build_decision_log_payload(
     rejection_reason: str | None,
     execution_result: Any = None,
     rejection_stage: str | None = None,
+    decision_config: Any = None,
 ) -> dict[str, Any]:
     """TradeCandidate / FinalDecision 전체 맥락을 JSON-compatible dict로 변환."""
     candidate = ctx.candidate
@@ -859,6 +886,7 @@ def _build_decision_log_payload(
         rejection_reason=rejection_reason,
         execution_result=execution_result,
     )
+    score_diag = _decision_score_diagnostics(decision, decision_config)
 
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -875,6 +903,7 @@ def _build_decision_log_payload(
         "chart_score": _primitive(getattr(decision, "chart_score", None)),
         "news_score": _primitive(getattr(decision, "news_score", None)),
         "derivatives_score": _primitive(getattr(decision, "derivatives_score", None)),
+        **score_diag,
         "strategy_type": (
             _primitive(getattr(candidate, "strategy_name", None))
             or _enum_value(getattr(candidate, "strategy_type", None))
@@ -936,6 +965,58 @@ def _infer_rejection_stage(final_action: str, rejection_reason: str) -> str:
     if final_action == "HOLD":
         return "decision"
     return "unknown"
+
+
+def _decision_score_diagnostics(decision: Any, config: Any = None) -> dict[str, Any]:
+    if decision is None:
+        return {
+            "long_score": None,
+            "short_score": None,
+            "risk_score": None,
+            "min_long_score": _cfg(config, "min_long_score", MIN_LONG_SCORE),
+            "min_short_score": _cfg(config, "min_short_score", MIN_SHORT_SCORE),
+            "max_risk_score": _cfg(config, "max_risk_score", MAX_RISK_SCORE),
+            "decision_score_summary": None,
+        }
+
+    chart = getattr(decision, "chart_score", None)
+    news = getattr(decision, "news_score", None)
+    deriv = getattr(decision, "derivatives_score", None)
+    long_score, short_score = _candidate_adjusted_scores(chart, deriv)
+    risk_score = _candidate_combined_risk(chart, news, deriv)
+    min_long = _cfg(config, "min_long_score", MIN_LONG_SCORE)
+    min_short = _cfg(config, "min_short_score", MIN_SHORT_SCORE)
+    max_risk = _cfg(config, "max_risk_score", MAX_RISK_SCORE)
+
+    summary = (
+        f"long={long_score:.2f}/{min_long:.2f}, "
+        f"short={short_score:.2f}/{min_short:.2f}, "
+        f"risk={risk_score:.2f}/{max_risk:.2f}"
+    )
+    reasons = list(getattr(decision, "reasons", []) or [])
+    if reasons:
+        summary = f"{summary}; reason={reasons[-1]}"
+
+    return {
+        "long_score": long_score,
+        "short_score": short_score,
+        "risk_score": risk_score,
+        "min_long_score": min_long,
+        "min_short_score": min_short,
+        "max_risk_score": max_risk,
+        "decision_score_summary": summary,
+    }
+
+
+def _cfg(config: Any, key: str, default: float) -> float:
+    if isinstance(config, dict):
+        value = config.get(key, default)
+    else:
+        value = getattr(config, key, default) if config is not None else default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _decision_outcome(
@@ -1085,6 +1166,78 @@ async def _fire_post_trade_hook(
         logger.exception(
             "post_trade_hook error — pipeline not affected user=%s coin=%s",
             inp.user_id, inp.coin,
+        )
+
+
+async def _fire_order_filled_alert(
+    dispatcher: AlertDispatcherProvider,
+    inp: PipelineInput,
+    ctx: PipelineContext,
+) -> None:
+    """Send a Telegram order-filled alert after a normal live or shadow entry."""
+    try:
+        from agents.alert.models import OrderFilledEvent
+
+        er = ctx.execution_result
+        entry_order = getattr(er, "entry_order", None)
+        if entry_order is None:
+            logger.warning(
+                "order_filled_alert skipped: entry_order missing user=%s coin=%s",
+                inp.user_id,
+                inp.coin,
+            )
+            return
+
+        raw = ctx.raw_signal
+        candidate = ctx.candidate
+        direction_value = (
+            getattr(raw, "direction", None)
+            or getattr(getattr(ctx.final_decision, "action", None), "value", None)
+            or getattr(ctx.final_decision, "action", "LONG")
+        )
+        direction = str(getattr(direction_value, "value", direction_value))
+        if direction not in ("LONG", "SHORT"):
+            logger.warning(
+                "order_filled_alert skipped: invalid direction=%s user=%s coin=%s",
+                direction,
+                inp.user_id,
+                inp.coin,
+            )
+            return
+
+        leverage = (
+            getattr(ctx.risk_result, "final_leverage", None)
+            or getattr(candidate, "leverage", None)
+            or 1
+        )
+        symbol = (
+            getattr(entry_order, "symbol", None)
+            or getattr(candidate, "symbol", None)
+            or f"{inp.coin}USDT"
+        )
+
+        event = OrderFilledEvent(
+            symbol=str(symbol),
+            direction=direction,  # type: ignore[arg-type]
+            fill_price=Decimal(str(getattr(entry_order, "avg_fill_price", "0"))),
+            quantity=Decimal(str(getattr(entry_order, "quantity", "0"))),
+            leverage=int(leverage),
+            take_profit=getattr(raw, "take_profit", None) if raw else None,
+            stop_loss=getattr(raw, "stop_loss", None) if raw else None,
+        )
+        result = await dispatcher.dispatch(event)
+        if getattr(result, "success", True) is False:
+            logger.warning(
+                "order_filled_alert failed user=%s coin=%s error=%s",
+                inp.user_id,
+                inp.coin,
+                getattr(result, "error", None),
+            )
+    except Exception:
+        logger.exception(
+            "order_filled_alert error ??pipeline not affected user=%s coin=%s",
+            inp.user_id,
+            inp.coin,
         )
 
 

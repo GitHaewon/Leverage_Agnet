@@ -118,6 +118,9 @@ async def test_save_allows_null_diagnostic_fields():
     await repo.save(rec)
     added_orm = session.add.call_args[0][0]
     assert added_orm.chart_score is None
+    assert added_orm.long_score is None
+    assert added_orm.short_score is None
+    assert added_orm.risk_score is None
     assert added_orm.ai_confidence is None
     assert added_orm.risk_passed is None
 
@@ -135,6 +138,13 @@ async def test_save_decision_log_maps_payload_to_shadow_decision():
             "timestamp": "2026-06-25T12:00:00+00:00",
             "market_regime": "TREND_UP",
             "chart_score": {"long_score": 80.0, "short_score": 10.0},
+            "long_score": 82.5,
+            "short_score": 11.25,
+            "risk_score": 22.75,
+            "min_long_score": 75.0,
+            "min_short_score": 75.0,
+            "max_risk_score": 55.0,
+            "decision_score_summary": "long=82.50/75.00, short=11.25/75.00, risk=22.75/55.00",
             "strategy_type": "PULLBACK",
             "candidate_action": "LONG",
             "final_action": "LONG",
@@ -162,6 +172,13 @@ async def test_save_decision_log_maps_payload_to_shadow_decision():
     assert added_orm.user_id == "user-001"
     assert added_orm.final_action == "LONG"
     assert added_orm.chart_score == Decimal("0.7")
+    assert added_orm.long_score == Decimal("82.5")
+    assert added_orm.short_score == Decimal("11.25")
+    assert added_orm.risk_score == Decimal("22.75")
+    assert added_orm.min_long_score == Decimal("75.0")
+    assert added_orm.min_short_score == Decimal("75.0")
+    assert added_orm.max_risk_score == Decimal("55.0")
+    assert added_orm.decision_score_summary.startswith("long=82.50")
     assert added_orm.ai_decision == "APPROVE"
     assert added_orm.risk_passed is True
     assert added_orm.shadow_trade_id == trade_id

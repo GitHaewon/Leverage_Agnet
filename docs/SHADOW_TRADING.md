@@ -84,6 +84,52 @@ python scripts/analyze_shadow_performance.py <path/to/app.log> -o my_summary.jso
 
 The script reads JSONL-formatted `decision_log` entries, computes aggregate metrics, prints a human-readable summary, and writes a machine-readable JSON file.
 
+## Running shadow DB quality analysis
+
+Use this when the Docker/Celery pipeline is writing `shadow_decisions` directly
+to Postgres and you want a pre-live quality check before any real trading:
+
+```bash
+python scripts/analyze_shadow_db.py
+python scripts/analyze_shadow_db.py -o logs/shadow_db_summary.json
+```
+
+The script reads `DATABASE_URL` first, or `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, and `POSTGRES_DB` from `backend/.env`, root `.env`, or the
+process environment. If `shadow_trades` is empty, it prints `성과 판단 불가`
+because win rate and PnL cannot be evaluated yet.
+
+## Shadow-only threshold experiments
+
+Shadow mode can use relaxed DecisionEngine gates without changing live trading
+defaults:
+
+```bash
+SHADOW_MIN_LONG_SCORE=60
+SHADOW_MIN_SHORT_SCORE=60
+SHADOW_MAX_RISK_SCORE=70
+```
+
+These values are read only when `SHADOW_TRADING_ENABLED=true` and
+`LIVE_TRADING_ENABLED=false`. If an env var is omitted, the existing conservative
+DecisionEngine defaults remain in effect: long `75.0`, short `75.0`, risk `55.0`.
+
+For the standalone live-data shadow runner, use the same env vars or one-off CLI
+overrides:
+
+```bash
+python scripts/run_shadow_live.py --symbol BTCUSDT \
+  --shadow-min-long-score 60 \
+  --shadow-min-short-score 60 \
+  --shadow-max-risk-score 70
+```
+
+Every new `shadow_decisions` row stores the applied `min_long_score`,
+`min_short_score`, and `max_risk_score`, plus the observed `long_score`,
+`short_score`, `risk_score`, and `decision_score_summary`. Use
+`scripts/analyze_shadow_db.py` to compare score distributions against the active
+thresholds.
+
 ## One-shot local smoke test
 
 Run a single local shadow decision without Binance order permissions, secrets, Redis,

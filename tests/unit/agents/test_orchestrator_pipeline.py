@@ -29,6 +29,7 @@ from agents.orchestrator.runner import AgentRunner
 from tests.unit.agents._orchestrator_fixtures import (
     MockDecisionProvider,
     MockExecutionProvider,
+    MockAlertDispatcher,
     MockMarketDataProvider,
     MockPortfolioProvider,
     MockPositionManagerProvider,
@@ -531,6 +532,13 @@ class TestDecisionLogs:
         assert log["expected_holding_minutes"] == 120
         assert log["min_required_rr"] == 2.0
         assert log["actual_rr"] == 2.2
+        assert log["long_score"] == 80.0
+        assert log["short_score"] == 10.0
+        assert log["risk_score"] == 12.0
+        assert log["min_long_score"] == 75.0
+        assert log["min_short_score"] == 75.0
+        assert log["max_risk_score"] == 55.0
+        assert "long=80.00/75.00" in log["decision_score_summary"]
 
     @pytest.mark.asyncio
     async def test_shadow_mode_logs_decision_without_real_order(self) -> None:
@@ -571,6 +579,13 @@ class TestDecisionLogs:
             "chart_score",
             "market_regime",
             "strategy_type",
+            "long_score",
+            "short_score",
+            "risk_score",
+            "min_long_score",
+            "min_short_score",
+            "max_risk_score",
+            "decision_score_summary",
             "candidate_action",
             "final_action",
             "rejection_stage",
@@ -665,6 +680,34 @@ class TestEmergencyTpSl:
         result = await _pipeline(deps).run(make_input())
         assert result.status == PipelineStatus.EMERGENCY_CLOSED
         assert len(fired) == 1
+
+
+class TestOrderFilledAlerts:
+    @pytest.mark.asyncio
+    async def test_completed_execution_sends_order_filled_alert(self) -> None:
+        dispatcher = MockAlertDispatcher()
+        exec_result = MockExecutionResult(
+            executed=True,
+            mode="paper",
+            entry_order=MockOrder(),
+        )
+        deps = make_deps(
+            reviewer=MockReviewerProvider(result=make_review(AIReviewAction.APPROVE)),
+            risk=MockRiskProvider(result=MockValidationResult(approved=True)),
+            execution=MockExecutionProvider(result=exec_result),
+            alert_dispatcher=dispatcher,
+        )
+
+        result = await _pipeline(deps).run(make_input("BTC"))
+
+        assert result.status == PipelineStatus.COMPLETED
+        assert len(dispatcher.events) == 1
+        event = dispatcher.events[0]
+        assert event.event_type == "order_filled"
+        assert event.symbol == "BTCUSDT"
+        assert event.direction == "LONG"
+        assert event.fill_price == MockOrder().avg_fill_price
+        assert event.quantity == MockOrder().quantity
 
 
 # ── 인프라 실패 (CRITICAL) ────────────────────────────────────────────────────

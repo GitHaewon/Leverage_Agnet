@@ -27,6 +27,13 @@ class ShadowDecision(PrimaryKeyMixin, Base):
     market_regime:  Mapped[str | None]     = mapped_column(String(20),    nullable=True)
     chart_score:    Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
     strategy_type:  Mapped[str | None]     = mapped_column(String(30),    nullable=True)
+    long_score:     Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    short_score:    Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    risk_score:     Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    min_long_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    min_short_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    max_risk_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    decision_score_summary: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     # ── TradeCandidate ───────────────────────────────────────────────────────────
     candidate_action:   Mapped[str | None]     = mapped_column(String(5),     nullable=True)

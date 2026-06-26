@@ -129,6 +129,28 @@ async def test_successful_execution_calls_store_once():
 
 
 @pytest.mark.asyncio
+async def test_successful_execution_persists_trade_fields():
+    sig = _signal(
+        direction="LONG",
+        entry_price="50000",
+        tp_price="55000",
+        sl_price="48000",
+    )
+    req, val = _req(signal=sig, validation_result=_validation(qty="0.0123", leverage=7))
+    engine, _, store = _make_engine(val)
+
+    await engine.execute(req)
+
+    record = store.save.await_args.args[0]
+    assert record.entry_price == Decimal("50000")
+    assert record.tp_price == Decimal("55000")
+    assert record.sl_price == Decimal("48000")
+    assert record.quantity == Decimal("0.0123")
+    assert record.leverage == 7
+    assert record.status == "OPEN"
+
+
+@pytest.mark.asyncio
 async def test_successful_execution_returns_paper_mode():
     req, val = _req()
     engine, _, _ = _make_engine(val)

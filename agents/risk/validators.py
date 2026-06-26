@@ -40,6 +40,7 @@ from agents.risk.models import (
     ValidationResult,
 )
 from agents.risk.sizing import validate_rr_ratio
+from agents.position_manager.models import MAX_DCA_COUNT
 
 
 # ════════════════════════════════════════════════════════════════
@@ -310,6 +311,8 @@ def check_same_coin_position(
 
     if existing.direction == signal.direction:
         # 동일 방향 → DCA 경로 (별도 DCA 검증 필요)
+        if existing.dca_count >= MAX_DCA_COUNT:
+            return False, f"DCA_LIMIT: max DCA {MAX_DCA_COUNT} reached", None
         return True, "DCA_ELIGIBLE", "dca"
     else:
         # 반대 방향 → 기존 포지션 먼저 청산 후 신규 진입
