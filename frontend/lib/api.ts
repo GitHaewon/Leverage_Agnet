@@ -33,7 +33,8 @@ function createApiClient(): AxiosInstance {
         _retry?: boolean
       }
 
-      if (error.response?.status === 401 && !originalRequest._retry) {
+      const isLoginEndpoint = originalRequest.url?.endsWith("/auth/login")
+      if (error.response?.status === 401 && !originalRequest._retry && !isLoginEndpoint) {
         originalRequest._retry = true
         try {
           const { data } = await axios.post(
