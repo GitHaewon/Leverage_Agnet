@@ -136,3 +136,23 @@ class OpenPosition:
     leverage: int
     dca_count: int = 0         # 현재까지 DCA 횟수
     original_risk_usdt: Decimal = Decimal("0")
+
+    @property
+    def notional_value(self) -> Decimal:
+        return self.quantity * self.entry_price
+
+    @property
+    def margin_used(self) -> Decimal:
+        return self.notional_value / max(self.leverage, 1)
+
+    @property
+    def unrealized_pnl(self) -> Decimal:
+        return Decimal("0")
+
+    @property
+    def risk_usdt(self) -> Decimal:
+        if self.original_risk_usdt > 0:
+            return self.original_risk_usdt
+        if self.direction == "LONG":
+            return max(Decimal("0"), (self.entry_price - self.stop_loss) * self.quantity)
+        return max(Decimal("0"), (self.stop_loss - self.entry_price) * self.quantity)

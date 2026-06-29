@@ -77,6 +77,13 @@ class ExecutionRequest:
     final_decision: Any = None
     approved_validation: ValidationResult | None = None
 
+    # Observability-only context used by ShadowExecutionEngine.  Live execution
+    # deliberately ignores these fields.
+    strategy_version: str | None = None
+    review_input_summary: dict[str, Any] | None = None
+    market_regime: str | None = None
+    pipeline_errors: list[dict[str, Any]] = field(default_factory=list)
+
 
 @dataclass
 class ExecutionResult:

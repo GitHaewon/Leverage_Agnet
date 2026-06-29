@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sys
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -81,6 +82,25 @@ def _mock_settings(*, shadow: bool, live: bool, **extra) -> MagicMock:
     s.SHADOW_MIN_SHORT_SCORE = None
     s.SHADOW_MAX_RISK_SCORE = None
     s.SHADOW_AI_REVIEW_REQUIRED = True
+    s.SHADOW_TAKER_FEE_RATE = Decimal("0.0004")
+    s.SHADOW_SLIPPAGE_BPS = Decimal("5")
+    s.SHADOW_FUNDING_RATE_PER_INTERVAL = Decimal("0.0001")
+    s.SHADOW_FUNDING_INTERVAL_HOURS = 8
+    s.SHADOW_FAST_EXIT_V2_ENABLED = False
+    s.SHADOW_RISK_SIZING_V2_ENABLED = False
+    s.SHADOW_FAST_EXIT_MIN_SL_PCT = Decimal("0.0025")
+    s.SHADOW_FAST_EXIT_MAX_HOLD_SECONDS = 900
+    s.SHADOW_FAST_EXIT_TP_PCT = Decimal("0.006")
+    s.SHADOW_FAST_EXIT_SL_PCT = Decimal("0.003")
+    s.SHADOW_FAST_EXIT_MIN_RR = Decimal("2")
+    s.SHADOW_RISK_PER_TRADE_PCT = Decimal("0.01")
+    s.SHADOW_SAFE_MAX_LEVERAGE = 5
+    s.SHADOW_MIN_TP_COST_MULTIPLE = Decimal("1")
+    s.SHADOW_EXPERIMENT_LABEL = "fast_exit_v2_ab"
+    s.SHADOW_MAX_PORTFOLIO_RISK_PCT = Decimal("0.10")
+    s.SHADOW_MAX_SINGLE_MARGIN_RATIO = Decimal("0.20")
+    s.SHADOW_MARGIN_BUFFER_RATIO = Decimal("1.10")
+    s.SYSTEM_MAX_LEVERAGE = 20
     s.OPENAI_API_KEY = "test-key"
     s.OPENAI_MODEL = "gpt-5"
     s.BINANCE_TESTNET = True

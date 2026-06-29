@@ -58,6 +58,26 @@ class Settings(BaseSettings):
     SHADOW_MIN_SHORT_SCORE: float | None = None
     SHADOW_MAX_RISK_SCORE: float | None = None
     SHADOW_AI_REVIEW_REQUIRED: bool = True
+    # Binance USD-M virtual MARKET fills. Explicit conservative defaults.
+    SHADOW_TAKER_FEE_RATE: Decimal = Decimal("0.0004")
+    SHADOW_SLIPPAGE_BPS: Decimal = Decimal("5")
+    SHADOW_FUNDING_RATE_PER_INTERVAL: Decimal = Decimal("0.0001")
+    SHADOW_FUNDING_INTERVAL_HOURS: int = 8
+    # [ASSUMPTION] Opt-in Shadow A/B defaults; both feature flags remain off.
+    SHADOW_FAST_EXIT_V2_ENABLED: bool = False
+    SHADOW_RISK_SIZING_V2_ENABLED: bool = False
+    SHADOW_FAST_EXIT_MIN_SL_PCT: Decimal = Decimal("0.0025")
+    SHADOW_FAST_EXIT_MAX_HOLD_SECONDS: int = 900
+    SHADOW_FAST_EXIT_TP_PCT: Decimal = Decimal("0.006")
+    SHADOW_FAST_EXIT_SL_PCT: Decimal = Decimal("0.003")
+    SHADOW_FAST_EXIT_MIN_RR: Decimal = Decimal("2.0")
+    SHADOW_RISK_PER_TRADE_PCT: Decimal = Decimal("0.01")
+    SHADOW_SAFE_MAX_LEVERAGE: int = 5
+    SHADOW_MIN_TP_COST_MULTIPLE: Decimal = Decimal("1.0")
+    SHADOW_EXPERIMENT_LABEL: str = "fast_exit_v2_ab"
+    SHADOW_MAX_PORTFOLIO_RISK_PCT: Decimal = Decimal("0.10")
+    SHADOW_MAX_SINGLE_MARGIN_RATIO: Decimal = Decimal("0.20")
+    SHADOW_MARGIN_BUFFER_RATIO: Decimal = Decimal("1.10")
 
     # ── Binance URL ─────────────────────────────────────────────────────────────
     BINANCE_TESTNET_BASE_URL: str = "https://testnet.binancefuture.com"
@@ -111,6 +131,32 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":
+        if not Decimal("0") <= self.SHADOW_TAKER_FEE_RATE <= Decimal("0.1"):
+            raise ValueError("SHADOW_TAKER_FEE_RATE must be between 0 and 0.1")
+        if not Decimal("0") <= self.SHADOW_SLIPPAGE_BPS <= Decimal("1000"):
+            raise ValueError("SHADOW_SLIPPAGE_BPS must be between 0 and 1000")
+        if (
+            self.SHADOW_FUNDING_INTERVAL_HOURS <= 0
+            or 24 % self.SHADOW_FUNDING_INTERVAL_HOURS
+        ):
+            raise ValueError("SHADOW_FUNDING_INTERVAL_HOURS must divide 24")
+        if self.SHADOW_RISK_SIZING_V2_ENABLED and not self.SHADOW_FAST_EXIT_V2_ENABLED:
+            raise ValueError(
+                "SHADOW_RISK_SIZING_V2_ENABLED requires SHADOW_FAST_EXIT_V2_ENABLED"
+            )
+        if min(
+            self.SHADOW_FAST_EXIT_MIN_SL_PCT,
+            self.SHADOW_FAST_EXIT_TP_PCT,
+            self.SHADOW_FAST_EXIT_SL_PCT,
+            self.SHADOW_FAST_EXIT_MIN_RR,
+            self.SHADOW_RISK_PER_TRADE_PCT,
+            self.SHADOW_MIN_TP_COST_MULTIPLE,
+        ) <= 0:
+            raise ValueError("Shadow experiment percentages and ratios must be positive")
+        if self.SHADOW_FAST_EXIT_MAX_HOLD_SECONDS <= 0:
+            raise ValueError("SHADOW_FAST_EXIT_MAX_HOLD_SECONDS must be positive")
+        if self.SHADOW_SAFE_MAX_LEVERAGE < 1:
+            raise ValueError("SHADOW_SAFE_MAX_LEVERAGE must be >= 1")
         if self.APP_ENV == "production":
             if self.DEBUG:
                 raise ValueError("DEBUG must be False in production")

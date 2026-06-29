@@ -19,6 +19,10 @@ ENV_FILES = (ROOT / ".env", ROOT / "backend" / ".env")
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(
         description="Analyze shadow_decisions and shadow_trades from Postgres."
     )
@@ -161,28 +165,49 @@ async def fetch_summary(conn: Any, db_url: str) -> dict[str, Any]:
     trade_summary = await conn.fetchrow(
         """
         SELECT
-            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status != 'REJECTED')::int AS total,
             COUNT(*) FILTER (WHERE status = 'OPEN')::int AS open_trades,
-            COUNT(*) FILTER (WHERE status IN ('TP_HIT', 'SL_HIT'))::int AS closed_trades,
+            COUNT(*) FILTER (WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD'))::int AS closed_trades,
             COUNT(*) FILTER (
-                WHERE status IN ('TP_HIT', 'SL_HIT') AND pnl_usdt > 0
+                WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD') AND net_pnl_usdt > 0
             )::int AS wins,
             COALESCE(
-                SUM(pnl_usdt) FILTER (WHERE status IN ('TP_HIT', 'SL_HIT')),
+                SUM(pnl_usdt) FILTER (WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD')),
                 0
             )::float AS gross_pnl,
             COALESCE(
                 SUM(pnl_usdt) FILTER (
-                    WHERE status IN ('TP_HIT', 'SL_HIT') AND pnl_usdt > 0
+                    WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD') AND pnl_usdt > 0
                 ),
                 0
             )::float AS gross_profit,
             COALESCE(
                 SUM(pnl_usdt) FILTER (
-                    WHERE status IN ('TP_HIT', 'SL_HIT') AND pnl_usdt < 0
+                    WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD') AND pnl_usdt < 0
                 ),
                 0
             )::float AS gross_loss
+            ,
+            COALESCE(
+                SUM(net_pnl_usdt) FILTER (WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD')),
+                0
+            )::float AS net_pnl,
+            COALESCE(
+                SUM(entry_fee_usdt + exit_fee_usdt)
+                    FILTER (WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD')), 0
+            )::float AS fees,
+            COALESCE(
+                SUM(funding_fee_usdt)
+                    FILTER (WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD')), 0
+            )::float AS funding,
+            COALESCE(
+                SUM(estimated_slippage_usdt)
+                    FILTER (WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD')), 0
+            )::float AS slippage,
+            COUNT(*) FILTER (
+                WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD')
+                  AND pnl_calculation_status = 'GROSS_FALLBACK'
+            )::int AS gross_fallback_count
         FROM shadow_trades
         """
     )
@@ -190,14 +215,14 @@ async def fetch_summary(conn: Any, db_url: str) -> dict[str, Any]:
         """
         SELECT direction, entry_price, tp_price, sl_price
         FROM shadow_trades
-        WHERE status IN ('TP_HIT', 'SL_HIT')
+        WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD')
         """
     )
     trade_pnl_rows = await conn.fetch(
         """
-        SELECT pnl_usdt::float AS pnl
+        SELECT net_pnl_usdt::float AS pnl
         FROM shadow_trades
-        WHERE status IN ('TP_HIT', 'SL_HIT') AND pnl_usdt IS NOT NULL
+        WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD') AND net_pnl_usdt IS NOT NULL
         ORDER BY closed_at ASC NULLS LAST, opened_at ASC
         """
     )
@@ -304,25 +329,25 @@ async def fetch_summary_v2(conn: Any, db_url: str) -> dict[str, Any]:
     trade_summary = await conn.fetchrow(
         """
         SELECT
-            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status != 'REJECTED')::int AS total,
             COUNT(*) FILTER (WHERE status = 'OPEN')::int AS open_trades,
-            COUNT(*) FILTER (WHERE status IN ('TP_HIT', 'SL_HIT'))::int AS closed_trades,
+            COUNT(*) FILTER (WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD'))::int AS closed_trades,
             COUNT(*) FILTER (
-                WHERE status IN ('TP_HIT', 'SL_HIT') AND pnl_usdt > 0
+                WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD') AND pnl_usdt > 0
             )::int AS wins,
             COALESCE(
-                SUM(pnl_usdt) FILTER (WHERE status IN ('TP_HIT', 'SL_HIT')),
+                SUM(pnl_usdt) FILTER (WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD')),
                 0
             )::float AS gross_pnl,
             COALESCE(
                 SUM(pnl_usdt) FILTER (
-                    WHERE status IN ('TP_HIT', 'SL_HIT') AND pnl_usdt > 0
+                    WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD') AND pnl_usdt > 0
                 ),
                 0
             )::float AS gross_profit,
             COALESCE(
                 SUM(pnl_usdt) FILTER (
-                    WHERE status IN ('TP_HIT', 'SL_HIT') AND pnl_usdt < 0
+                    WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD') AND pnl_usdt < 0
                 ),
                 0
             )::float AS gross_loss
@@ -333,14 +358,14 @@ async def fetch_summary_v2(conn: Any, db_url: str) -> dict[str, Any]:
         """
         SELECT direction, entry_price, tp_price, sl_price
         FROM shadow_trades
-        WHERE status IN ('TP_HIT', 'SL_HIT')
+        WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD')
         """
     )
     trade_pnl_rows = await conn.fetch(
         """
         SELECT pnl_usdt::float AS pnl
         FROM shadow_trades
-        WHERE status IN ('TP_HIT', 'SL_HIT') AND pnl_usdt IS NOT NULL
+        WHERE status IN ('TP_HIT', 'SL_HIT', 'MAX_HOLD') AND pnl_usdt IS NOT NULL
         ORDER BY closed_at ASC NULLS LAST, opened_at ASC
         """
     )
@@ -367,6 +392,14 @@ async def fetch_summary_v2(conn: Any, db_url: str) -> dict[str, Any]:
 
 
 def build_trade_metrics(summary: Any, rr_rows: list[Any], pnl_rows: list[Any]) -> dict[str, Any]:
+    def _value(name: str, default: Any = 0) -> Any:
+        if summary is None:
+            return default
+        try:
+            return summary[name]
+        except (KeyError, IndexError, TypeError):
+            return default
+
     total = int(summary["total"] or 0) if summary else 0
     open_trades = int(summary["open_trades"] or 0) if summary else 0
     closed_trades = int(summary["closed_trades"] or 0) if summary else 0
@@ -374,6 +407,14 @@ def build_trade_metrics(summary: Any, rr_rows: list[Any], pnl_rows: list[Any]) -
     gross_pnl = float(summary["gross_pnl"] or 0.0) if summary else 0.0
     gross_profit = float(summary["gross_profit"] or 0.0) if summary else 0.0
     gross_loss = float(summary["gross_loss"] or 0.0) if summary else 0.0
+    has_net_costs = False
+    if summary is not None:
+        try:
+            summary["net_pnl"]
+            has_net_costs = True
+        except (KeyError, IndexError, TypeError):
+            pass
+    net_pnl = float(_value("net_pnl", gross_pnl) or 0.0)
     profit_factor = None
     if gross_loss < 0:
         profit_factor = gross_profit / abs(gross_loss)
@@ -387,11 +428,16 @@ def build_trade_metrics(summary: Any, rr_rows: list[Any], pnl_rows: list[Any]) -
         "performance_status": "성과 판단 불가" if total == 0 else "성과 판단 가능",
         "win_rate": (wins / closed_trades * 100.0) if closed_trades else None,
         "gross_pnl": gross_pnl if closed_trades else None,
-        "net_pnl": gross_pnl if closed_trades else None,
-        "fees_slippage_reflected": False,
+        "net_pnl": net_pnl if closed_trades else None,
+        "fees": float(_value("fees", 0) or 0.0),
+        "funding": float(_value("funding", 0) or 0.0),
+        "slippage": float(_value("slippage", 0) or 0.0),
+        "gross_fallback_count": int(_value("gross_fallback_count", 0) or 0),
+        "fees_slippage_reflected": has_net_costs,
         "fees_slippage_note": (
-            "shadow_trades currently stores gross PnL only; net_pnl equals gross_pnl "
-            "until fee/slippage columns are added."
+            None
+            if has_net_costs
+            else "legacy rows/schema: net PnL falls back to gross PnL"
         ),
         "profit_factor": profit_factor,
         "max_drawdown": _max_drawdown([float(row["pnl"]) for row in pnl_rows]),
@@ -663,6 +709,9 @@ def print_trade_metrics(trades: dict[str, Any]) -> None:
     print(f"Win rate            : {_fmt_pct(trades['win_rate'])}")
     print(f"Gross PnL           : {_fmt_money(trades['gross_pnl'])}")
     print(f"Net PnL             : {_fmt_money(trades['net_pnl'])}")
+    print(f"Entry/exit fees     : {_fmt_money(trades['fees'])}")
+    print(f"Funding fee         : {_fmt_money(trades['funding'])}")
+    print(f"Estimated slippage  : {_fmt_money(trades['slippage'])}")
     print(f"Profit factor       : {_fmt(trades['profit_factor'])}")
     print(f"Max drawdown        : {_fmt_money(trades['max_drawdown'])}")
     print(f"Average R:R         : {_fmt(trades['average_rr'])}")

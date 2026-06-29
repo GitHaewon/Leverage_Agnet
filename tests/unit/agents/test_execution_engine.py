@@ -446,6 +446,20 @@ def test_candidate_rejected_by_risk_never_reaches_execution():
     assert len(gw.recorded_orders) == 0
 
 
+def test_live_execution_explicitly_rejects_shadow_strategy_version():
+    req = make_candidate_request(make_trade_candidate())
+    req.strategy_version = "fast_exit_v2"
+    gw = MockGateway()
+    engine = _engine_live(make_approved_validation(), gateway=gw)
+
+    result = _run(engine.execute(req))
+
+    assert not result.approved
+    assert not result.executed
+    assert result.rejection_code == "SHADOW_STRATEGY_FORBIDDEN"
+    assert len(gw.recorded_orders) == 0
+
+
 def test_final_decision_hold_never_reaches_execution():
     candidate = make_trade_candidate()
     final_decision = make_final_decision(candidate, action=FinalAction.HOLD)

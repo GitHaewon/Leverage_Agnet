@@ -206,6 +206,14 @@ class ExecutionEngine:
           approved=True, executed=True  → 주문 체결 완료
         """
         try:
+            if self._live and req.strategy_version == "fast_exit_v2":
+                return ExecutionResult(
+                    approved=False,
+                    executed=False,
+                    mode=self._mode,
+                    rejection_code="SHADOW_STRATEGY_FORBIDDEN",
+                    rejection_reason="fast_exit_v2 is restricted to Shadow execution",
+                )
             # ── STEP 1: Approved Risk Validation 확인 ─────────────────────
             # New deterministic flow: RiskEngine.validate_candidate() already
             # approved the TradeCandidate before FinalDecision reached execution.

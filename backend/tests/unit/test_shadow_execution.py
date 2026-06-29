@@ -20,8 +20,10 @@ Shadow Trading Mode 단위 테스트.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -29,6 +31,10 @@ import pytest
 from agents.execution.models import ExecutionRequest
 from agents.shadow.execution import ShadowExecutionEngine
 from agents.shadow.models import ShadowTradeRecord
+from agents.shadow.pnl import ShadowCostConfig
+from agents.shadow.experiment import ShadowExperimentConfig
+from agents.shadow.risk_state import UnresolvedOpenRiskError
+from agents.shadow.strategies.fast_exit_v2 import FastExitConfig
 
 
 # ── 픽스처 헬퍼 ──────────────────────────────────────────────────────────────────
@@ -48,6 +54,7 @@ def _signal(
     s.stop_loss = Decimal(sl_price)
     s.coin = coin
     s.symbol = symbol
+    s.signal_id = uuid.uuid4()
     return s
 
 
@@ -59,6 +66,8 @@ def _validation(approved: bool = True, qty: str = "0.01", leverage: int = 5) -> 
     v.rejection_code = "RISK_FAIL" if not approved else None
     v.rejection_reason = "test rejection" if not approved else None
     v.warnings = []
+    v.margin_required_usdt = Decimal("100")
+    v.max_loss_usdt = Decimal("25")
     return v
 
 
@@ -147,7 +156,60 @@ async def test_successful_execution_persists_trade_fields():
     assert record.sl_price == Decimal("48000")
     assert record.quantity == Decimal("0.0123")
     assert record.leverage == 7
+
+
+@pytest.mark.asyncio
+async def test_successful_execution_persists_performance_context():
+    req, val = _req()
+    req.strategy_version = "decision-pipeline-v2"
+    req.market_regime = "TREND_UP"
+    req.review_input_summary = {"chart_long_score": 72.0}
+    req.candidate = MagicMock()
+    req.candidate.reasons = ["trend confirmed"]
+    req.candidate.expected_fees = Decimal("2")
+    req.candidate.expected_slippage_cost = Decimal("0.5")
+    review = MagicMock()
+    review.review_action.value = "APPROVE"
+    review.confidence = 0.84
+    req.final_decision = MagicMock(ai_review=review)
+
+    engine, _, store = _make_engine(val)
+    await engine.execute(req)
+
+    record = store.save.await_args.args[0]
+    assert record.strategy_version == "decision-pipeline-v2"
+    assert record.signal_id == str(req.signal.signal_id)
+    assert record.position_size_usdt == Decimal("500.00")
+    assert record.margin_usdt == Decimal("100")
+    assert record.tp_distance == Decimal("5000")
+    assert record.sl_distance == Decimal("2000")
+    assert record.expected_max_loss_usdt == Decimal("25")
+    assert record.reviewer_input_summary == {"chart_long_score": 72.0}
+    assert record.reviewer_result == "APPROVE"
+    assert record.reviewer_score == 0.84
+    assert record.market_regime == "TREND_UP"
+    assert record.entry_fee_usdt == Decimal("0.20010000")
+    assert record.exit_fee_usdt == Decimal("0")
+    assert record.estimated_slippage_usdt == Decimal("0.25000000")
     assert record.status == "OPEN"
+
+
+def test_close_calculates_gross_and_net_pnl_with_costs():
+    record = ShadowTradeRecord.open(
+        user_id="u1", coin="BTC", symbol="BTCUSDT", direction="LONG",
+        entry_price=Decimal("100"), tp_price=Decimal("120"),
+        sl_price=Decimal("90"), quantity=Decimal("2"), leverage=2,
+    )
+    record.close(Decimal("120"), "TP_HIT")
+    assert record.gross_pnl_usdt == Decimal("40.0")
+    assert record.entry_fee_usdt == Decimal("0.08004000")
+    assert record.exit_fee_usdt == Decimal("0.09595200")
+    assert record.entry_slippage_usdt == Decimal("0.10000000")
+    assert record.exit_slippage_usdt == Decimal("0.12000000")
+    assert record.estimated_slippage_usdt == Decimal("0.22000000")
+    assert record.net_pnl_usdt == Decimal("39.60400800")
+    assert record.exit_reason == "TP_HIT"
+    assert record.status == "TP_HIT"
 
 
 @pytest.mark.asyncio
@@ -336,6 +398,7 @@ async def test_monitor_closes_long_tp_hit():
     trade.sl_price = Decimal("48000")
     trade.quantity = Decimal("0.01")
     trade.opened_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    trade.max_hold_seconds = None
 
     repo_mock = AsyncMock()
     repo_mock.get_open_trades = AsyncMock(return_value=[trade])
@@ -351,12 +414,21 @@ async def test_monitor_closes_long_tp_hit():
         closed = await check_and_close_shadow_trades(
             {"BTCUSDT": Decimal("55500")},
             session_mock,
+            ShadowCostConfig(
+                taker_fee_rate=Decimal("0"),
+                slippage_bps=Decimal("0"),
+                funding_rate_per_interval=Decimal("0"),
+            ),
         )
 
     assert closed == 1
     call_kwargs = repo_mock.close_trade.call_args
     assert call_kwargs.kwargs["status"] == "TP_HIT"
     assert call_kwargs.kwargs["exit_price"] == Decimal("55000")
+    assert call_kwargs.kwargs["gross_pnl_usdt"] == Decimal("50.0")
+    assert call_kwargs.kwargs["net_pnl_usdt"] == Decimal("50.00000000")
+    assert call_kwargs.kwargs["exit_reason"] == "TP_HIT"
+    repo_mock.update_excursions.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -374,6 +446,7 @@ async def test_monitor_closes_short_sl_hit():
     trade.sl_price = Decimal("3200")
     trade.quantity = Decimal("0.1")
     trade.opened_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    trade.max_hold_seconds = None
 
     repo_mock = AsyncMock()
     repo_mock.get_open_trades = AsyncMock(return_value=[trade])
@@ -386,6 +459,11 @@ async def test_monitor_closes_short_sl_hit():
         closed = await check_and_close_shadow_trades(
             {"ETHUSDT": Decimal("3250")},
             AsyncMock(),
+            ShadowCostConfig(
+                taker_fee_rate=Decimal("0"),
+                slippage_bps=Decimal("0"),
+                funding_rate_per_interval=Decimal("0"),
+            ),
         )
 
     assert closed == 1
@@ -407,6 +485,7 @@ async def test_monitor_skips_trade_price_not_reached():
     trade.sl_price = Decimal("48000")
     trade.quantity = Decimal("0.01")
     trade.opened_at = datetime.now(timezone.utc)
+    trade.max_hold_seconds = None
 
     repo_mock = AsyncMock()
     repo_mock.get_open_trades = AsyncMock(return_value=[trade])
@@ -419,7 +498,284 @@ async def test_monitor_skips_trade_price_not_reached():
         closed = await check_and_close_shadow_trades(
             {"BTCUSDT": Decimal("52000")},  # 중간 가격 — TP/SL 미도달
             AsyncMock(),
+            ShadowCostConfig(
+                taker_fee_rate=Decimal("0"),
+                slippage_bps=Decimal("0"),
+                funding_rate_per_interval=Decimal("0"),
+            ),
         )
 
     assert closed == 0
     repo_mock.close_trade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_monitor_marks_missing_price_as_data_error():
+    from app.workers.shadow_monitor_worker import check_and_close_shadow_trades
+    from unittest.mock import patch
+
+    trade = MagicMock(id=uuid.uuid4(), symbol="BTCUSDT", direction="LONG")
+    trade.max_hold_seconds = None
+    repo_mock = AsyncMock()
+    repo_mock.get_open_trades = AsyncMock(return_value=[trade])
+
+    with patch(
+        "app.repositories.shadow_trade_repository.ShadowTradeRepository",
+        return_value=repo_mock,
+    ):
+        closed = await check_and_close_shadow_trades(
+            {},
+            AsyncMock(),
+            ShadowCostConfig(
+                taker_fee_rate=Decimal("0"),
+                slippage_bps=Decimal("0"),
+                funding_rate_per_interval=Decimal("0"),
+            ),
+        )
+
+    assert closed == 0
+    repo_mock.mark_data_error.assert_awaited_once_with(trade.id)
+
+
+class _Action(str, Enum):
+    LONG = "LONG"
+
+
+@dataclass
+class _Candidate:
+    action: _Action = _Action.LONG
+    coin: str = "BTC"
+    symbol: str = "BTCUSDT"
+    entry_price: Decimal = Decimal("50000")
+    take_profit: Decimal = Decimal("51000")
+    stop_loss: Decimal = Decimal("49500")
+    expected_holding_minutes: int = 60
+    actual_rr: float = 2.0
+    reasons: list[str] = field(default_factory=lambda: ["source"])
+
+
+@pytest.mark.asyncio
+async def test_enabled_experiment_saves_independent_baseline_and_fast_records():
+    candidate = _Candidate()
+    source_prices = (candidate.take_profit, candidate.stop_loss)
+    req, val = _req(signal=_signal())
+    req.candidate = candidate
+    req.final_decision = MagicMock()
+    req.approved_validation = val
+    req.user_ctx.plan = "pro"
+    req.user_ctx.max_leverage = 10
+    req.account.total_balance = Decimal("10000")
+    req.account.available_balance = Decimal("10000")
+    req.user_ctx.plan = "pro"
+    req.user_ctx.max_leverage = 10
+    req.user_ctx.daily_loss_limit_pct = 0.03
+    req.account.total_balance = Decimal("10000")
+    req.account.available_balance = Decimal("10000")
+    store = AsyncMock()
+    store.save = AsyncMock()
+    store.get_open_risk_usdt = AsyncMock(return_value=Decimal("0"))
+    store.get_loss_state = AsyncMock(
+        return_value=MagicMock(
+            daily_loss_usdt=Decimal("0"), consecutive_losses=0
+        )
+    )
+    engine = ShadowExecutionEngine(
+        risk_validator=AsyncMock(),
+        store=store,
+        cost_config=ShadowCostConfig(),
+        experiment_config=ShadowExperimentConfig(
+            fast_exit_enabled=True,
+            risk_sizing_enabled=True,
+            experiment_label="ab-test",
+            fast_exit=FastExitConfig(
+                tp_pct=Decimal("0.006"),
+                sl_pct=Decimal("0.003"),
+                min_sl_pct=Decimal("0.0025"),
+                max_hold_seconds=900,
+                min_rr=Decimal("2"),
+                min_tp_cost_multiple=Decimal("1"),
+            ),
+        ),
+    )
+
+    result = await engine.execute(req)
+
+    assert result.approved and result.executed
+    assert store.save.await_count == 2
+    baseline = store.save.await_args_list[0].args[0]
+    fast = store.save.await_args_list[1].args[0]
+    assert baseline.strategy_version == "baseline_v1"
+    assert fast.strategy_version == "fast_exit_v2"
+    assert baseline.signal_id == fast.signal_id
+    assert baseline.experiment_label == fast.experiment_label == "ab-test"
+    assert fast.tp_price != baseline.tp_price
+    assert fast.actual_max_loss_usdt <= fast.risk_budget_usdt
+    assert candidate.take_profit == source_prices[0]
+    assert candidate.stop_loss == source_prices[1]
+
+
+@pytest.mark.asyncio
+async def test_unresolved_open_risk_rejects_experiment_without_uncaught_exception():
+    req, val = _req(signal=_signal())
+    req.candidate = _Candidate()
+    req.final_decision = MagicMock()
+    req.approved_validation = val
+    req.user_ctx.plan = "pro"
+    req.user_ctx.max_leverage = 10
+    req.account.total_balance = Decimal("10000")
+    req.account.available_balance = Decimal("10000")
+
+    store = AsyncMock()
+    store.save = AsyncMock()
+    store.get_open_risk_usdt = AsyncMock(
+        side_effect=UnresolvedOpenRiskError("OPEN_RISK_UNRESOLVED: trade-1")
+    )
+    engine = ShadowExecutionEngine(
+        risk_validator=AsyncMock(),
+        store=store,
+        experiment_config=ShadowExperimentConfig(
+            fast_exit_enabled=True,
+            risk_sizing_enabled=True,
+            fast_exit=FastExitConfig(
+                tp_pct=Decimal("0.006"),
+                sl_pct=Decimal("0.003"),
+                min_sl_pct=Decimal("0.0025"),
+                max_hold_seconds=900,
+                min_rr=Decimal("2"),
+                min_tp_cost_multiple=Decimal("1"),
+            ),
+        ),
+    )
+
+    result = await engine.execute(req)
+
+    assert result is not None
+    assert not result.approved
+    assert not result.executed
+    assert result.rejection_code == "OPEN_RISK_UNRESOLVED"
+    assert "OPEN_RISK_UNRESOLVED" in result.rejection_reason
+    store.save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fast_variant_failure_does_not_change_baseline_result():
+    candidate = _Candidate()
+    req, val = _req(signal=_signal())
+    req.candidate = candidate
+    req.final_decision = MagicMock()
+    req.approved_validation = val
+    req.user_ctx.plan = "pro"
+    req.user_ctx.max_leverage = 10
+    req.user_ctx.daily_loss_limit_pct = 0.03
+    req.account.total_balance = Decimal("10000")
+    req.account.available_balance = Decimal("10000")
+    store = AsyncMock()
+    store.save = AsyncMock()
+    store.get_open_risk_usdt = AsyncMock(return_value=Decimal("0"))
+    engine = ShadowExecutionEngine(
+        risk_validator=AsyncMock(),
+        store=store,
+        experiment_config=ShadowExperimentConfig(
+            fast_exit_enabled=True,
+            risk_sizing_enabled=False,
+            fast_exit=None,  # invalid on purpose; isolated experiment failure
+        ),
+    )
+
+    result = await engine.execute(req)
+
+    assert result.approved and result.executed
+    assert store.save.await_count == 1
+    assert store.save.await_args.args[0].strategy_version == "baseline_v1"
+
+
+@pytest.mark.asyncio
+async def test_fast_rejection_is_recorded_without_rejecting_baseline():
+    req, val = _req(signal=_signal())
+    req.candidate = _Candidate()
+    req.final_decision = MagicMock()
+    req.approved_validation = val
+    req.user_ctx.plan = "pro"
+    req.user_ctx.max_leverage = 10
+    req.user_ctx.daily_loss_limit_pct = 0.03
+    req.account.total_balance = Decimal("10000")
+    req.account.available_balance = Decimal("10000")
+    store = AsyncMock()
+    store.save = AsyncMock()
+    store.get_open_risk_usdt = AsyncMock(return_value=Decimal("0"))
+    store.get_loss_state = AsyncMock(
+        return_value=MagicMock(
+            daily_loss_usdt=Decimal("0"), consecutive_losses=0
+        )
+    )
+    engine = ShadowExecutionEngine(
+        risk_validator=AsyncMock(),
+        store=store,
+        cost_config=ShadowCostConfig(
+            taker_fee_rate=Decimal("0.01"),
+            slippage_bps=Decimal("100"),
+            funding_rate_per_interval=Decimal("0.001"),
+        ),
+        experiment_config=ShadowExperimentConfig(
+            fast_exit_enabled=True,
+            risk_sizing_enabled=False,
+            fast_exit=FastExitConfig(
+                tp_pct=Decimal("0.006"),
+                sl_pct=Decimal("0.003"),
+                min_sl_pct=Decimal("0.0025"),
+                max_hold_seconds=900,
+                min_rr=Decimal("2"),
+                min_tp_cost_multiple=Decimal("1"),
+            ),
+        ),
+    )
+
+    result = await engine.execute(req)
+
+    baseline, fast = [call.args[0] for call in store.save.await_args_list]
+    assert result.approved and baseline.status == "OPEN"
+    assert fast.status == "REJECTED"
+    assert fast.rejection_code in {
+        "NON_POSITIVE_TP_NET",
+        "TP_COST_MULTIPLE_NOT_MET",
+    }
+
+
+@pytest.mark.asyncio
+async def test_monitor_closes_at_max_hold_with_market_price():
+    from app.workers.shadow_monitor_worker import check_and_close_shadow_trades
+    from unittest.mock import patch
+
+    trade = MagicMock()
+    trade.id = uuid.uuid4()
+    trade.symbol = "BTCUSDT"
+    trade.direction = "LONG"
+    trade.entry_price = Decimal("50000")
+    trade.tp_price = Decimal("55000")
+    trade.sl_price = Decimal("48000")
+    trade.quantity = Decimal("0.01")
+    trade.margin_usdt = Decimal("100")
+    trade.max_hold_seconds = 60
+    trade.opened_at = datetime.now(timezone.utc) - timedelta(seconds=61)
+    repo_mock = AsyncMock()
+    repo_mock.get_open_trades = AsyncMock(return_value=[trade])
+
+    with patch(
+        "app.repositories.shadow_trade_repository.ShadowTradeRepository",
+        return_value=repo_mock,
+    ):
+        closed = await check_and_close_shadow_trades(
+            {"BTCUSDT": Decimal("50100")},
+            AsyncMock(),
+            ShadowCostConfig(
+                taker_fee_rate=Decimal("0"),
+                slippage_bps=Decimal("0"),
+                funding_rate_per_interval=Decimal("0"),
+            ),
+        )
+
+    assert closed == 1
+    kwargs = repo_mock.close_trade.await_args.kwargs
+    assert kwargs["status"] == "MAX_HOLD"
+    assert kwargs["exit_reason"] == "MAX_HOLD"
+    assert kwargs["exit_price"] == Decimal("50100")

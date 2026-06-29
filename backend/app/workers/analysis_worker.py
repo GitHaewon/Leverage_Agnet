@@ -104,10 +104,38 @@ async def _build_deps(
     elif settings.SHADOW_TRADING_ENABLED:
         # Shadow mode: ShadowExecutionEngine — Risk 검증 동일, 가상 체결을 DB에 저장
         from agents.shadow.execution import ShadowExecutionEngine
+        from agents.shadow.pnl import ShadowCostConfig
+        from agents.shadow.experiment import ShadowExperimentConfig
+        from agents.shadow.strategies.fast_exit_v2 import FastExitConfig
         from app.repositories.shadow_trade_repository import ShadowTradeRepository
         execution = ShadowExecutionEngine(
             risk_validator=risk_engine,
             store=ShadowTradeRepository(session),
+            cost_config=ShadowCostConfig(
+                taker_fee_rate=settings.SHADOW_TAKER_FEE_RATE,
+                slippage_bps=settings.SHADOW_SLIPPAGE_BPS,
+                funding_rate_per_interval=settings.SHADOW_FUNDING_RATE_PER_INTERVAL,
+                funding_interval_hours=settings.SHADOW_FUNDING_INTERVAL_HOURS,
+            ),
+            experiment_config=ShadowExperimentConfig(
+                fast_exit_enabled=settings.SHADOW_FAST_EXIT_V2_ENABLED,
+                risk_sizing_enabled=settings.SHADOW_RISK_SIZING_V2_ENABLED,
+                experiment_label=settings.SHADOW_EXPERIMENT_LABEL,
+                fast_exit=FastExitConfig(
+                    tp_pct=settings.SHADOW_FAST_EXIT_TP_PCT,
+                    sl_pct=settings.SHADOW_FAST_EXIT_SL_PCT,
+                    min_sl_pct=settings.SHADOW_FAST_EXIT_MIN_SL_PCT,
+                    max_hold_seconds=settings.SHADOW_FAST_EXIT_MAX_HOLD_SECONDS,
+                    min_rr=settings.SHADOW_FAST_EXIT_MIN_RR,
+                    min_tp_cost_multiple=settings.SHADOW_MIN_TP_COST_MULTIPLE,
+                ),
+                risk_per_trade_pct=settings.SHADOW_RISK_PER_TRADE_PCT,
+                safe_max_leverage=settings.SHADOW_SAFE_MAX_LEVERAGE,
+                max_portfolio_risk_pct=settings.SHADOW_MAX_PORTFOLIO_RISK_PCT,
+                max_single_position_margin_ratio=settings.SHADOW_MAX_SINGLE_MARGIN_RATIO,
+                margin_buffer_ratio=settings.SHADOW_MARGIN_BUFFER_RATIO,
+                system_max_leverage=settings.SYSTEM_MAX_LEVERAGE,
+            ),
         )
     else:
         # Paper mode: 주문 실행 없음, 시그널 로직 검증 전용
@@ -229,6 +257,12 @@ async def _run_cycle_async(symbols: list[str]) -> dict[str, Any]:
                                 shadow_repo = ShadowTradeRepository(shadow_session)
                                 shadow_positions = await shadow_repo.get_open_positions_for_risk(str(user.id))
                                 inp.open_positions = list(shadow_positions)
+                                if settings.SHADOW_FAST_EXIT_V2_ENABLED:
+                                    baseline_loss = await shadow_repo.get_loss_state(
+                                        str(user.id), "baseline_v1"
+                                    )
+                                    inp.daily_loss_usdt = baseline_loss.daily_loss_usdt
+                                    inp.consecutive_losses = baseline_loss.consecutive_losses
                                 if inp.account_state is not None:
                                     inp.account_state.open_positions_count = len(shadow_positions)
                                     inp.account_state.open_positions_risk_usdt = sum(

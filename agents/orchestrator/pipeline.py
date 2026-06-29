@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -433,7 +434,11 @@ class OrchestratorPipeline:
 
         # ── RawSignal 생성 (legacy PositionManager / Execution 입력) ──────────
         raw_signal = _build_raw_signal_from_candidate(
-            inp.coin, symbol, candidate, getattr(ctx.decision_result, "confidence", 0.0)
+            inp.coin,
+            symbol,
+            candidate,
+            getattr(ctx.decision_result, "confidence", 0.0),
+            signal_id=uuid.UUID(ctx.run_id),
         )
         ctx.raw_signal = raw_signal
 
@@ -589,6 +594,18 @@ class OrchestratorPipeline:
             candidate=candidate,
             final_decision=ctx.final_decision,
             approved_validation=ctx.risk_result,
+            strategy_version="decision-pipeline-v2",
+            review_input_summary=_safe_review_summary(
+                _build_review_input(symbol, ctx.decision_result, candidate)
+            ),
+            market_regime=(
+                getattr(
+                    getattr(getattr(ctx.decision_result, "regime", None), "regime", None),
+                    "value",
+                    "UNKNOWN",
+                )
+            ),
+            pipeline_errors=list(ctx.errors),
         )
         r10 = await _run_step(
             "execution",
@@ -773,11 +790,23 @@ def _build_review_input(symbol: str, decision_result: Any, candidate: Any) -> An
     )
 
 
+def _safe_review_summary(review_input: Any) -> dict[str, Any]:
+    """Persist only the compact, already-sanitized reviewer inputs."""
+    from dataclasses import asdict
+
+    data = asdict(review_input)
+    # Reasons are deterministic signal summaries, not news/GPT source text.
+    for key in ("chart_reasons", "news_reasons", "deriv_reasons"):
+        data[key] = [str(item)[:200] for item in data.get(key, [])[:5]]
+    return data
+
+
 def _build_raw_signal_from_candidate(
     coin: str,
     symbol: str,
     candidate: Any,
     confidence: float,
+    signal_id: Any = None,
 ) -> Any:
     """
     결정적 TradeCandidate → RawSignal (legacy PositionManager / Execution 호환).
@@ -796,6 +825,7 @@ def _build_raw_signal_from_candidate(
         take_profit=candidate.take_profit,
         stop_loss=candidate.stop_loss,
         leverage=candidate.leverage,
+        signal_id=signal_id,
     )
 
 
